@@ -27,7 +27,9 @@ from qgis.core import (
     QgsWkbTypes,
     QgsLineSymbol,
     QgsSymbol,
-    QgsSingleSymbolRenderer # Import QgsSingleSymbolRenderer for type checking
+    QgsSingleSymbolRenderer,
+    QgsMarkerSymbol,
+    QgsUnitTypes # Import QgsUnitTypes
 )
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget
 
@@ -130,6 +132,7 @@ class FracLineDockWidget(QgsDockWidget):
         self.boundary_layer = None
         self.reference_line_layer = None
         self.fractures_layer = None
+        self.intersections_layer = None
 
         # Create widgets
         self.fractures_combo = QgsMapLayerComboBox(self)
@@ -164,7 +167,6 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(QLabel('Scanlines:'))
         layout.addWidget(self.scanlines_combo)
         layout.addWidget(QLabel('Reference line:'))
-        layout.addWidget(self.reference_line_combo)
         layout.addWidget(QLabel('Interpretation boundary:'))
         layout.addWidget(self.interpretation_boundary_combo)
         layout.addWidget(self.run_button)
@@ -240,12 +242,10 @@ class FracLineDockWidget(QgsDockWidget):
         existing_clip_layer = QgsProject.instance().mapLayersByName('scanlines_clip')
         if existing_clip_layer:
             existing_clip_layer = existing_clip_layer[0]
-            # Check if it's a file-based layer
             if existing_clip_layer.source().startswith('/') or existing_clip_layer.source().startswith('file://'):
                 self.log_browser.append("ERROR: A file-based layer named 'scanlines_clip' already exists. Aborting to prevent overwrite.")
                 return
             else:
-                # It's a memory layer, ask to overwrite
                 reply = QMessageBox.question(self, 'Overwrite Layer?',
                                              "A temporary layer named 'scanlines_clip' already exists. Do you want to overwrite it?",
                                              QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
@@ -291,7 +291,7 @@ class FracLineDockWidget(QgsDockWidget):
             features = list(self.scanlines_clip.getFeatures())
             if not features:
                 self.log_browser.append("Warning: Clip operation resulted in an empty layer.")
-                self.scanlines_clip = geopandas.GeoDataFrame([], columns=['ID', 'geometry'])
+                scanlines_clip_gdf = geopandas.GeoDataFrame([], columns=['ID', 'geometry'])
                 return
 
             ids = [f['ID'] for f in features]
@@ -299,14 +299,73 @@ class FracLineDockWidget(QgsDockWidget):
             
             shapely_geoms = [loads(wkt) for wkt in geoms_wkt]
 
-            self.scanlines_clip = geopandas.GeoDataFrame(
+            scanlines_clip_gdf = geopandas.GeoDataFrame(
                 {'ID': ids},
                 geometry=shapely_geoms,
                 crs=self.scanlines_clip.crs().toWkt()
             )
             
             self.log_browser.append("Analysis complete. 'scanlines_clip' GeoDataFrame created.")
-            self.log_browser.append("GeoDataFrame head:\n" + str(self.scanlines_clip.head()))
+            self.log_browser.append("GeoDataFrame head:\n" + str(scanlines_clip_gdf.head()))
+
+            # Intersect scanlines_clip with fractures
+            if self.fractures_layer:
+                self.log_browser.append("Intersecting scanlines_clip with fractures...")
+                
+                existing_intersections_layer = QgsProject.instance().mapLayersByName('intersections')
+                if existing_intersections_layer:
+                    existing_intersections_layer = existing_intersections_layer[0]
+                    if existing_intersections_layer.source().startswith('/') or existing_intersections_layer.source().startswith('file://'):
+                        self.log_browser.append("ERROR: A file-based layer named 'intersections' already exists. Aborting to prevent overwrite.")
+                        return
+                    else:
+                        reply = QMessageBox.question(self, 'Overwrite Layer?',
+                                                     "A temporary layer named 'intersections' already exists. Do you want to overwrite it?",
+                                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                        if reply == QMessageBox.No:
+                            self.log_browser.append("Intersection analysis aborted by user.")
+                            return
+                        else:
+                            QgsProject.instance().removeMapLayer(existing_intersections_layer.id())
+                            self.log_browser.append("Existing 'intersections' layer removed.")
+
+                intersection_result = qgis.processing.run("native:lineintersections", {
+                    'INPUT': self.scanlines_clip,
+                    'INTERSECT': self.fractures_layer,
+                    'OUTPUT': 'memory:'
+                })
+                self.intersections_layer = intersection_result['OUTPUT']
+                self.intersections_layer.setName('intersections')
+                QgsProject.instance().addMapLayer(self.intersections_layer)
+                self.log_browser.append("Temporary layer 'intersections' created and added to canvas.")
+
+                # Style the intersection layer
+                if renderer and symbol:
+                    symbol_layer = symbol.symbolLayer(0)
+                    if symbol_layer:
+                        # Convert QgsUnitTypes.RenderUnit enum to string for createSimple
+                        unit_string = QgsUnitTypes.encodeUnit(symbol_layer.widthUnit())
+
+                        point_symbol = QgsMarkerSymbol.createSimple({
+                            'name': 'circle',
+                            'color': 'white',  # Fill color is white
+                            'outline_color': symbol_layer.color().name(), # Outline color from scanlines
+                            'outline_width': str(symbol_layer.width()), # Outline width same as scanlines line width
+                            'outline_width_unit': unit_string, # Use converted unit string
+                            'size': str(symbol_layer.width() * 8),
+                            'size_unit': unit_string # Use converted unit string
+                        })
+                        point_renderer = QgsSingleSymbolRenderer(point_symbol)
+                        self.intersections_layer.setRenderer(point_renderer)
+                        self.intersections_layer.triggerRepaint()
+                        self.log_browser.append("Style applied to 'intersections' layer.")
+                    else:
+                        self.log_browser.append("Warning: Could not get symbol layer from scanlines layer. Cannot apply style to intersections.")
+                else:
+                    self.log_browser.append("Warning: Could not get style from scanlines layer. Cannot apply style to intersections.")
+
+            else:
+                self.log_browser.append("No fractures layer selected. Skipping intersection.")
 
         except Exception as e:
             self.log_browser.append(f"ERROR during analysis: {e}")
