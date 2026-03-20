@@ -1,0 +1,11 @@
+[general]
+name=FracLine
+description=Analysis of fractures along 1D scanlines.
+version=0.1.0
+qgisMinimumVersion=3.28
+author=Andrea Bistacchi & Stefano Casiraghi
+email=andrea.bistacchi@unimib.it
+about=Analysis of fractures along 1D scanlines.
+category=Analysis
+plugin_dependencies=PackageInstallerQgis
+icon=icon.png
