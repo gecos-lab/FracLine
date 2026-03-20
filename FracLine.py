@@ -15,9 +15,10 @@
 
 import os
 import geopandas
+import numpy as np
 import qgis.processing
 from shapely.wkt import loads
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import QAction, QWidget, QVBoxLayout, QTextBrowser, QLabel, QPushButton, QMessageBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
@@ -29,7 +30,8 @@ from qgis.core import (
     QgsSymbol,
     QgsSingleSymbolRenderer,
     QgsMarkerSymbol,
-    QgsUnitTypes # Import QgsUnitTypes
+    QgsUnitTypes,
+    QgsField
 )
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget
 
@@ -92,6 +94,40 @@ def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_
             raise QgsProcessingException(
                 f'Layer {name} must have a single feature.'
             )
+
+def calculate_perpendicular_distance(point, line_start, line_end):
+    """
+    Calculates the perpendicular distance from a point to a line segment defined by two points.
+    Uses numpy for vector calculations.
+    """
+    p0 = np.array([point.x(), point.y()])
+    p1 = np.array([line_start.x(), line_start.y()])
+    p2 = np.array([line_end.x(), line_end.y()])
+
+    # Vector from p1 to p2
+    v = p2 - p1
+    # Vector from p1 to p0
+    w = p0 - p1
+
+    # Squared length of the line segment
+    l2 = np.dot(v, v)
+    if l2 == 0.0: # p1 and p2 are the same point
+        return np.linalg.norm(p0 - p1)
+
+    # Parameter t of the closest point on the line (p1 + t*v) to p0
+    # t = dot(w, v) / l2
+    t = np.dot(w, v) / l2
+
+    if t < 0.0:
+        # Closest point is p1
+        return np.linalg.norm(p0 - p1)
+    elif t > 1.0:
+        # Closest point is p2
+        return np.linalg.norm(p0 - p2)
+    else:
+        # Closest point is on the segment
+        projection = p1 + t * v
+        return np.linalg.norm(p0 - projection)
 
 class FracLinePlugin:
     def __init__(self, iface):
@@ -167,6 +203,7 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(QLabel('Scanlines:'))
         layout.addWidget(self.scanlines_combo)
         layout.addWidget(QLabel('Reference line:'))
+        layout.addWidget(self.reference_line_combo)
         layout.addWidget(QLabel('Interpretation boundary:'))
         layout.addWidget(self.interpretation_boundary_combo)
         layout.addWidget(self.run_button)
@@ -203,6 +240,31 @@ class FracLineDockWidget(QgsDockWidget):
     def validate_layers(self):
         self.log_browser.clear()
         try:
+            project_crs = QgsProject.instance().crs()
+            if not project_crs.isValid():
+                raise QgsProcessingException("Project CRS is not set or is invalid.")
+
+            self.log_browser.append(f"Project CRS: {project_crs.description()}")
+
+            layers_to_check = [
+                (self.fractures_combo.currentLayer(), 'Fractures'),
+                (self.scanlines_combo.currentLayer(), 'Scanlines'),
+                (self.reference_line_combo.currentLayer(), 'Reference line'),
+                (self.interpretation_boundary_combo.currentLayer(), 'Interpretation boundary')
+            ]
+
+            for layer, name in layers_to_check:
+                if layer:
+                    layer_crs = layer.crs()
+                    if not layer_crs.isValid():
+                        raise QgsProcessingException(f"Layer '{name}' has an invalid CRS.")
+                    if layer_crs != project_crs:
+                        raise QgsProcessingException(
+                            f"CRS mismatch: Layer '{name}' ({layer_crs.description()}) "
+                            f"does not match Project CRS ({project_crs.description()})."
+                        )
+                    self.log_browser.append(f"Layer '{name}' CRS validated successfully.")
+
             self.fractures_layer = self.fractures_combo.currentLayer()
             if self.fractures_layer:
                 self.log_browser.append('Validating Fractures layer...')
@@ -231,12 +293,15 @@ class FracLineDockWidget(QgsDockWidget):
             self.log_browser.append(f'ERROR: {e}')
 
     def run_analysis(self):
-        self.log_browser.clear()
+        self.log_browser.append("==================================================")
         self.log_browser.append("Running analysis...")
 
         if not self.scanlines_layer or not self.boundary_layer:
             self.log_browser.append("ERROR: Both scanlines and interpretation boundary layers must be selected.")
             return
+
+        # Get project CRS
+        project_crs = QgsProject.instance().crs()
 
         # Check for existing 'scanlines_clip' layer
         existing_clip_layer = QgsProject.instance().mapLayersByName('scanlines_clip')
@@ -262,7 +327,8 @@ class FracLineDockWidget(QgsDockWidget):
             result = qgis.processing.run("native:clip", {
                 'INPUT': self.scanlines_layer,
                 'OVERLAY': self.boundary_layer,
-                'OUTPUT': 'memory:'
+                'OUTPUT': 'memory:',
+                'CRS': project_crs # Set output CRS to project CRS
             })
             
             self.scanlines_clip = result['OUTPUT']
@@ -287,26 +353,10 @@ class FracLineDockWidget(QgsDockWidget):
             else:
                 self.log_browser.append("Warning: Could not get renderer from scanlines layer. Cannot apply style.")
 
-            # Convert to GeoDataFrame
-            features = list(self.scanlines_clip.getFeatures())
-            if not features:
+            # Check if the clip operation resulted in an empty layer
+            if self.scanlines_clip.featureCount() == 0:
                 self.log_browser.append("Warning: Clip operation resulted in an empty layer.")
-                scanlines_clip_gdf = geopandas.GeoDataFrame([], columns=['ID', 'geometry'])
                 return
-
-            ids = [f['ID'] for f in features]
-            geoms_wkt = [f.geometry().asWkt() for f in features]
-            
-            shapely_geoms = [loads(wkt) for wkt in geoms_wkt]
-
-            scanlines_clip_gdf = geopandas.GeoDataFrame(
-                {'ID': ids},
-                geometry=shapely_geoms,
-                crs=self.scanlines_clip.crs().toWkt()
-            )
-            
-            self.log_browser.append("Analysis complete. 'scanlines_clip' GeoDataFrame created.")
-            self.log_browser.append("GeoDataFrame head:\n" + str(scanlines_clip_gdf.head()))
 
             # Intersect scanlines_clip with fractures
             if self.fractures_layer:
@@ -329,15 +379,75 @@ class FracLineDockWidget(QgsDockWidget):
                             QgsProject.instance().removeMapLayer(existing_intersections_layer.id())
                             self.log_browser.append("Existing 'intersections' layer removed.")
 
+                # Determine the ID field name from scanlines_clip
+                scanline_id_field_name = None
+                scanlines_fields = self.scanlines_clip.fields()
+                if 'ID' in scanlines_fields.names():
+                    scanline_id_field_name = 'ID'
+                elif 'id' in scanlines_fields.names():
+                    scanline_id_field_name = 'id'
+
+                if not scanline_id_field_name:
+                    self.log_browser.append("ERROR: Could not find 'ID' or 'id' field in 'scanlines_clip' layer.")
+                    return
+
                 intersection_result = qgis.processing.run("native:lineintersections", {
                     'INPUT': self.scanlines_clip,
                     'INTERSECT': self.fractures_layer,
-                    'OUTPUT': 'memory:'
+                    'INPUT_FIELDS': [scanline_id_field_name],
+                    'INTERSECT_FIELDS': [],
+                    'OUTPUT': 'memory:',
+                    'CRS': project_crs # Set output CRS to project CRS
                 })
                 self.intersections_layer = intersection_result['OUTPUT']
+
+                # Rename the field to 'scanline_id'
+                provider = self.intersections_layer.dataProvider()
+                field_index = self.intersections_layer.fields().indexOf(scanline_id_field_name)
+                if field_index != -1:
+                    provider.renameAttributes({field_index: 'scanline_id'})
+                    self.intersections_layer.updateFields()
+
+                # Remove 'ID_2' field if it exists
+                id2_field_index = self.intersections_layer.fields().indexOf('ID_2')
+                if id2_field_index != -1:
+                    provider.deleteAttributes([id2_field_index])
+                    self.intersections_layer.updateFields()
+
                 self.intersections_layer.setName('intersections')
                 QgsProject.instance().addMapLayer(self.intersections_layer)
-                self.log_browser.append("Temporary layer 'intersections' created and added to canvas.")
+                self.log_browser.append("Temporary layer 'intersections' created and added to canvas with 'scanline_id' field.")
+
+                # Calculate and add distance field if reference line is present
+                if self.reference_line_layer:
+                    self.log_browser.append("Calculating distances to reference line...")
+                    
+                    # Get the reference line geometry
+                    ref_line_feature = next(self.reference_line_layer.getFeatures())
+                    vertices = list(ref_line_feature.geometry().vertices())
+                    line_start, line_end = vertices[0], vertices[1]
+
+                    # Add 'distance' field
+                    provider = self.intersections_layer.dataProvider()
+                    if provider.fieldNameIndex('distance') == -1:
+                        provider.addAttributes([QgsField("distance", QVariant.Double)])
+                        self.intersections_layer.updateFields()
+
+                    distance_field_index = self.intersections_layer.fields().indexOf('distance')
+
+                    # Calculate and update distances for each intersection point
+                    self.intersections_layer.startEditing()
+                    for feature in self.intersections_layer.getFeatures():
+                        intersection_point = feature.geometry().asPoint()
+                        distance = calculate_perpendicular_distance(intersection_point, line_start, line_end)
+                        self.intersections_layer.changeAttributeValue(feature.id(), distance_field_index, float(distance))
+                    
+                    if not self.intersections_layer.commitChanges():
+                        self.log_browser.append("ERROR: Could not commit changes to intersections layer for distances.")
+                    else:
+                        self.log_browser.append("Distances calculated and added to 'intersections' layer.")
+                else:
+                    self.log_browser.append("No reference line selected. Skipping distance calculation.")
 
                 # Style the intersection layer
                 if renderer and symbol:
@@ -352,7 +462,7 @@ class FracLineDockWidget(QgsDockWidget):
                             'outline_color': symbol_layer.color().name(), # Outline color from scanlines
                             'outline_width': str(symbol_layer.width()), # Outline width same as scanlines line width
                             'outline_width_unit': unit_string, # Use converted unit string
-                            'size': str(symbol_layer.width() * 8),
+                            'size': str(symbol_layer.width() * 6),
                             'size_unit': unit_string # Use converted unit string
                         })
                         point_renderer = QgsSingleSymbolRenderer(point_symbol)
