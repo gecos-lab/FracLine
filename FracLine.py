@@ -31,9 +31,14 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
     QgsMarkerSymbol,
     QgsUnitTypes,
-    QgsField
+    QgsField,
+    QgsVectorLayer, # Added
+    QgsFeature,     # Added
+    QgsGeometry,    # Added
+    QgsFeatureRequest # Added
 )
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget
+from collections import defaultdict # Added
 
 def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_polygon=False):
     """
@@ -169,6 +174,7 @@ class FracLineDockWidget(QgsDockWidget):
         self.reference_line_layer = None
         self.fractures_layer = None
         self.intersections_layer = None
+        self.scanlines_clip_split = None # Added
 
         # Create widgets
         self.fractures_combo = QgsMapLayerComboBox(self)
@@ -324,17 +330,25 @@ class FracLineDockWidget(QgsDockWidget):
 
         self.log_browser.append("Clipping scanlines to boundary...")
         try:
-            result = qgis.processing.run("native:clip", {
+            clip_result = qgis.processing.run("native:clip", {
                 'INPUT': self.scanlines_layer,
                 'OVERLAY': self.boundary_layer,
                 'OUTPUT': 'memory:',
-                'CRS': project_crs # Set output CRS to project CRS
+                'CRS': project_crs
             })
-            
-            self.scanlines_clip = result['OUTPUT']
+            clipped_layer = clip_result['OUTPUT']
+
+            self.log_browser.append("Converting clipped scanlines to single parts...")
+            singleparts_result = qgis.processing.run("native:multiparttosingleparts", {
+                'INPUT': clipped_layer,
+                'OUTPUT': 'memory:',
+                'CRS': project_crs
+            })
+
+            self.scanlines_clip = singleparts_result['OUTPUT']
             self.scanlines_clip.setName('scanlines_clip')
             QgsProject.instance().addMapLayer(self.scanlines_clip)
-            self.log_browser.append("Temporary layer 'scanlines_clip' created and added to canvas.")
+            self.log_browser.append("Temporary layer 'scanlines_clip' (single parts) created and added to canvas.")
 
             # Apply style to scanlines_clip layer
             renderer = self.scanlines_layer.renderer()
@@ -449,7 +463,137 @@ class FracLineDockWidget(QgsDockWidget):
                 else:
                     self.log_browser.append("No reference line selected. Skipping distance calculation.")
 
-                # Style the intersection layer
+                # --- Split scanlines_clip and filter segments ---
+                self.log_browser.append("Splitting scanlines and filtering segments...")
+
+                # Check for existing 'scanlines_clip_split' layer
+                existing_split_layer = QgsProject.instance().mapLayersByName('scanlines_clip_split')
+                if existing_split_layer:
+                    existing_split_layer = existing_split_layer[0]
+                    if existing_split_layer.source().startswith('/') or existing_split_layer.source().startswith('file://'):
+                        self.log_browser.append("ERROR: A file-based layer named 'scanlines_clip_split' already exists. Aborting to prevent overwrite.")
+                        return
+                    else:
+                        reply = QMessageBox.question(self, 'Overwrite Layer?',
+                                                     "A temporary layer named 'scanlines_clip_split' already exists. Do you want to overwrite it?",
+                                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                        if reply == QMessageBox.No:
+                            self.log_browser.append("Split scanlines analysis aborted by user.")
+                            return
+                        else:
+                            QgsProject.instance().removeMapLayer(existing_split_layer.id())
+                            self.log_browser.append("Existing 'scanlines_clip_split' layer removed.")
+
+                # Perform the split operation
+                split_result = qgis.processing.run("native:splitwithlines", {
+                    'INPUT': self.scanlines_clip,
+                    'LINES': self.fractures_layer,
+                    'OUTPUT': 'memory:',
+                    'CRS': project_crs
+                })
+                split_layer = split_result['OUTPUT']
+                split_layer.setName('temp_split_scanlines') # Give it a temporary name
+
+                if split_layer.featureCount() == 0:
+                    self.log_browser.append("Warning: Split operation resulted in an empty layer. No segments to process.")
+                    # Create an empty output layer if no splits occurred
+                    output_layer = QgsVectorLayer("LineString", "scanlines_clip_split", "memory")
+                    output_layer.setCrs(project_crs)
+                    # Copy fields from the original scanlines_clip layer
+                    output_layer.dataProvider().addAttributes(self.scanlines_clip.fields().toList()) 
+                    output_layer.updateFields()
+                    QgsProject.instance().addMapLayer(output_layer)
+                    self.scanlines_clip_split = output_layer
+                    self.log_browser.append("Empty 'scanlines_clip_split' layer created.")
+                    QgsProject.instance().removeMapLayer(split_layer.id()) # Clean up temp layer
+                    return
+
+
+                # Create output layer for filtered segments
+                output_layer = QgsVectorLayer("LineString", "scanlines_clip_split", "memory")
+                output_layer.setCrs(project_crs)
+                # Copy fields from the split_layer (which should have fields from scanlines_clip)
+                output_layer.dataProvider().addAttributes(split_layer.fields().toList())
+                output_layer.updateFields()
+                
+                output_features = []
+                segments_by_scanline = defaultdict(list)
+
+                # Group segments by their original scanline ID
+                for feature in split_layer.getFeatures():
+                    # Use the determined scanline_id_field_name for grouping
+                    scanline_id = feature[scanline_id_field_name]
+                    segments_by_scanline[scanline_id].append(feature)
+
+                # Process each original scanline's segments
+                for scanline_id, segments in segments_by_scanline.items():
+                    if len(segments) <= 2: # If 0, 1, or 2 segments, remove all (first and last)
+                        continue 
+
+                    # Get the original unsplit scanline geometry to determine order
+                    original_scanline_feature = None
+                    # Use the original scanlines_clip layer to get the full geometry
+                    # Need to use a request with the correct field name
+                    request = QgsFeatureRequest().setFilterExpression(f"\"{scanline_id_field_name}\" = '{scanline_id}'")
+                    for f in self.scanlines_clip.getFeatures(request):
+                        original_scanline_feature = f
+                        break
+                    
+                    if not original_scanline_feature:
+                        self.log_browser.append(f"Warning: Original scanline with ID '{scanline_id}' not found in scanlines_clip for ordering.")
+                        continue
+
+                    original_geom = original_scanline_feature.geometry()
+
+                    # Sort segments by their position along the original line
+                    sorted_segments_with_dist = []
+                    for segment_feature in segments:
+                        segment_geom = segment_feature.geometry()
+                        # Get the first point of the segment
+                        # QgsGeometry.asPolyline() returns a list of QgsPointXY
+                        first_point_of_segment = segment_geom.asPolyline()[0]
+                        
+                        # Calculate distance along the original line
+                        distance = original_geom.lineLocatePoint(QgsGeometry.fromPointXY(first_point_of_segment))
+                        
+                        if distance >= 0: # lineLocatePoint returns -1 if point is not on line
+                            sorted_segments_with_dist.append((distance, segment_feature))
+                        else:
+                            self.log_browser.append(f"Warning: Segment for scanline ID '{scanline_id}' could not be located on original line for sorting.")
+
+                    sorted_segments_with_dist.sort(key=lambda x: x[0])
+
+                    # Filter segments: Exclude first and last
+                    segments_to_keep = [item[1] for item in sorted_segments_with_dist[1:-1]] # Exclude first and last
+
+                    for segment_feature in segments_to_keep:
+                        new_feature = QgsFeature(output_layer.fields())
+                        new_feature.setGeometry(segment_feature.geometry())
+                        new_feature.setAttributes(segment_feature.attributes())
+                        output_features.append(new_feature)
+                
+                output_layer.dataProvider().addFeatures(output_features)
+                QgsProject.instance().addMapLayer(output_layer)
+                self.scanlines_clip_split = output_layer
+                self.log_browser.append("Temporary layer 'scanlines_clip_split' created and added to canvas with filtered segments.")
+
+                # Apply style to scanlines_clip_split layer
+                if renderer and symbol:
+                    new_symbol_split = symbol.clone()
+                    new_symbol_split.setWidth(symbol.width() * 2) # Same doubled thickness
+                    new_renderer_split = QgsSingleSymbolRenderer(new_symbol_split)
+                    self.scanlines_clip_split.setRenderer(new_renderer_split)
+                    self.scanlines_clip_split.triggerRepaint()
+                    self.log_browser.append("Style applied to 'scanlines_clip_split' with doubled line thickness.")
+                else:
+                    self.log_browser.append("Warning: Could not get renderer/symbol from scanlines layer. Cannot apply style to scanlines_clip_split.")
+
+
+                # Remove the temporary split_layer from the project if it was added
+                QgsProject.instance().removeMapLayer(split_layer.id())
+
+
+                # Style the intersection layer (existing code)
                 if renderer and symbol:
                     symbol_layer = symbol.symbolLayer(0)
                     if symbol_layer:
@@ -475,7 +619,7 @@ class FracLineDockWidget(QgsDockWidget):
                     self.log_browser.append("Warning: Could not get style from scanlines layer. Cannot apply style to intersections.")
 
             else:
-                self.log_browser.append("No fractures layer selected. Skipping intersection.")
+                self.log_browser.append("No fractures layer selected. Skipping intersection and splitting.")
 
         except Exception as e:
             self.log_browser.append(f"ERROR during analysis: {e}")
