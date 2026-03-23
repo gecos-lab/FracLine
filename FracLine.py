@@ -552,7 +552,9 @@ class FracLineDockWidget(QgsDockWidget):
             QgsField("scanline_id", QVariant.String),
             QgsField("scanline_part_id", QVariant.String),
             QgsField("distance", QVariant.Double),
-            QgsField("spacing", QVariant.Double)
+            QgsField("spacing", QVariant.Double),
+            QgsField("distance_order", QVariant.Int),
+            QgsField("spacing_order", QVariant.Int)
         ])
         self.scanlines_clip_split.updateFields()
         
@@ -603,10 +605,29 @@ class FracLineDockWidget(QgsDockWidget):
                 
                 new_feature = QgsFeature(self.scanlines_clip_split.fields())
                 new_feature.setGeometry(geom)
-                new_feature.setAttributes([scanline_id, scanline_part_id, distance_to_ref, spacing])
+                new_feature.setAttributes([scanline_id, scanline_part_id, distance_to_ref, spacing, None, None])
                 output_features.append(new_feature)
-        
-        provider_split.addFeatures(output_features)
+
+        # Group features by scanline_id and rank them
+        features_by_scanline = defaultdict(list)
+        for feature in output_features:
+            features_by_scanline[feature['scanline_id']].append(feature)
+
+        final_features_with_ranks = []
+        for scanline_id, features_in_group in features_by_scanline.items():
+            # Rank by distance
+            features_in_group.sort(key=lambda f: f['distance'])
+            for i, feature in enumerate(features_in_group):
+                feature['distance_order'] = i + 1
+
+            # Rank by spacing
+            features_in_group.sort(key=lambda f: f['spacing'])
+            for i, feature in enumerate(features_in_group):
+                feature['spacing_order'] = i + 1
+            
+            final_features_with_ranks.extend(features_in_group)
+
+        provider_split.addFeatures(final_features_with_ranks)
         QgsProject.instance().addMapLayer(self.scanlines_clip_split, False)
         output_group.addLayer(self.scanlines_clip_split)
         self.log_browser.append("Temporary layer 'scanlines_clip_split' created with filtered segments and simplified fields.")
