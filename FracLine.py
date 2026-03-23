@@ -19,7 +19,7 @@ import numpy as np
 import qgis.processing
 from shapely.wkt import loads
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtWidgets import QAction, QWidget, QVBoxLayout, QTextBrowser, QLabel, QPushButton, QMessageBox, QHBoxLayout
+from qgis.PyQt.QtWidgets import QAction, QWidget, QVBoxLayout, QTextBrowser, QLabel, QPushButton, QMessageBox, QHBoxLayout, QSpinBox, QComboBox
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsMapLayerProxyModel, 
@@ -193,6 +193,14 @@ class FracLineDockWidget(QgsDockWidget):
 
         self.log_browser = QTextBrowser(self)
         self.measure_button = QPushButton("Measure spacing and distance")
+        
+        self.barcode_height_spinbox = QSpinBox()
+        self.barcode_height_spinbox.setRange(1, 100)
+        self.barcode_height_spinbox.setValue(10)
+
+        self.barcode_color_combo = QComboBox()
+        self.barcode_color_combo.addItems(['Black', 'Red', 'Green', 'Blue', 'Cyan', 'Magenta', 'Yellow', 'Orange', 'Purple', 'Grey'])
+
         self.run_scanline_analysis_button = QPushButton("Run analysis on scanlines")
         self.run_scanline_analysis_button.setEnabled(False)
 
@@ -215,6 +223,14 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(QLabel('Interpretation boundary:'))
         layout.addWidget(self.interpretation_boundary_combo)
         layout.addWidget(self.measure_button)
+        
+        barcode_layout = QHBoxLayout()
+        barcode_layout.addWidget(QLabel("Barcode Height:"))
+        barcode_layout.addWidget(self.barcode_height_spinbox)
+        barcode_layout.addWidget(QLabel("Barcode Color:"))
+        barcode_layout.addWidget(self.barcode_color_combo)
+        layout.addLayout(barcode_layout)
+
         layout.addWidget(self.run_scanline_analysis_button)
         layout.addWidget(QLabel('Log:'))
         layout.addWidget(self.log_browser)
