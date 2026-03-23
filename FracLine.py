@@ -19,7 +19,7 @@ import numpy as np
 import qgis.processing
 from shapely.wkt import loads
 from qgis.PyQt.QtCore import Qt, QVariant
-from qgis.PyQt.QtWidgets import QAction, QWidget, QVBoxLayout, QTextBrowser, QLabel, QPushButton, QMessageBox
+from qgis.PyQt.QtWidgets import QAction, QWidget, QVBoxLayout, QTextBrowser, QLabel, QPushButton, QMessageBox, QHBoxLayout
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
     QgsMapLayerProxyModel, 
@@ -41,6 +41,9 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget, QgsFieldComboBox
 from collections import defaultdict, Counter
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_polygon=False, skip_id_check=False):
     """
@@ -130,6 +133,29 @@ class FracLinePlugin:
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
         self.dockwidget.show()
 
+class FracLinePlotWidget(QgsDockWidget):
+    def __init__(self, iface):
+        super().__init__('FracLine Plots')
+        self.iface = iface
+        self.setAllowedAreas(Qt.BottomDockWidgetArea)
+
+        # Main widget and layout
+        main_widget = QWidget()
+        main_layout = QHBoxLayout()
+        main_widget.setLayout(main_layout)
+        self.setWidget(main_widget)
+
+        # Create two figures and canvases
+        self.figure1, self.ax1 = plt.subplots()
+        self.canvas1 = FigureCanvas(self.figure1)
+        
+        self.figure2, self.ax2 = plt.subplots()
+        self.canvas2 = FigureCanvas(self.figure2)
+
+        # Add canvases to the layout
+        main_layout.addWidget(self.canvas1)
+        main_layout.addWidget(self.canvas2)
+
 class FracLineDockWidget(QgsDockWidget):
     def __init__(self, iface):
         super().__init__('FracLine')
@@ -166,7 +192,9 @@ class FracLineDockWidget(QgsDockWidget):
         self.interpretation_boundary_combo.setCurrentIndex(0)
 
         self.log_browser = QTextBrowser(self)
-        self.run_button = QPushButton("Run Analysis")
+        self.measure_button = QPushButton("Measure spacing and distance")
+        self.run_scanline_analysis_button = QPushButton("Run analysis on scanlines")
+        self.run_scanline_analysis_button.setEnabled(False)
 
         # Set layer filters
         self.fractures_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
@@ -186,7 +214,8 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(self.reference_line_combo)
         layout.addWidget(QLabel('Interpretation boundary:'))
         layout.addWidget(self.interpretation_boundary_combo)
-        layout.addWidget(self.run_button)
+        layout.addWidget(self.measure_button)
+        layout.addWidget(self.run_scanline_analysis_button)
         layout.addWidget(QLabel('Log:'))
         layout.addWidget(self.log_browser)
 
@@ -200,7 +229,7 @@ class FracLineDockWidget(QgsDockWidget):
         self.scanlines_combo.layerChanged.connect(self.update_scanline_id_field_combo)
         self.reference_line_combo.layerChanged.connect(self.validate_layers)
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
-        self.run_button.clicked.connect(self.run_analysis)
+        self.measure_button.clicked.connect(self.run_analysis)
 
         self.find_and_set_layers()
         self.validate_layers()
@@ -692,6 +721,9 @@ class FracLineDockWidget(QgsDockWidget):
                 )
                 if self.scanlines_clip_split is None: # Indicates an error or user cancellation
                     return
+                
+                if self.intersections_layer and self.scanlines_clip_split:
+                    self.run_scanline_analysis_button.setEnabled(True)
             else:
                 self.log_browser.append("No fractures layer selected. Skipping intersection and splitting.")
 
