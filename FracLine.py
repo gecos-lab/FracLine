@@ -39,7 +39,7 @@ from qgis.core import (
     QgsFieldProxyModel
 )
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget, QgsFieldComboBox
-from collections import defaultdict # Added
+from collections import defaultdict, Counter # Added
 
 def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_polygon=False, skip_id_check=False):
     """
@@ -419,68 +419,61 @@ class FracLineDockWidget(QgsDockWidget):
                 'OUTPUT': 'memory:',
                 'CRS': project_crs
             })
+            single_parts_layer = singleparts_result['OUTPUT']
 
-            self.scanlines_clip = singleparts_result['OUTPUT']
-            self.scanlines_clip.setName('scanlines_clip')
-            
-            # --- Rename field and add scanline_part_id ---
-            self.log_browser.append("Renaming ID field and adding 'scanline_part_id'...")
-            
+            # --- Create scanlines_clip with simplified fields ---
+            self.log_browser.append("Processing clipped scanlines and calculating distances...")
+            self.scanlines_clip = QgsVectorLayer(f"LineString?crs={project_crs.toWkt()}", "scanlines_clip", "memory")
             provider = self.scanlines_clip.dataProvider()
-            
-            # Rename the original ID field to 'scanline_id'
-            original_field_index = self.scanlines_clip.fields().indexOf(scanline_id_field_name)
-            if original_field_index != -1:
-                provider.renameAttributes({original_field_index: 'scanline_id'})
-                self.scanlines_clip.updateFields()
-                self.log_browser.append(f"Field '{scanline_id_field_name}' renamed to 'scanline_id'.")
-            else:
-                self.log_browser.append(f"Warning: Could not find field '{scanline_id_field_name}' to rename.")
-
-            # Add the new 'scanline_part_id' field
-            if self.scanlines_clip.fields().indexOf('scanline_part_id') == -1:
-                provider.addAttributes([QgsField("scanline_part_id", QVariant.String)])
-                self.scanlines_clip.updateFields()
-                self.log_browser.append("Field 'scanline_part_id' added.")
+            provider.addAttributes([
+                QgsField("scanline_id", QVariant.String),
+                QgsField("scanline_part_id", QVariant.String),
+                QgsField("distance", QVariant.Double)
+            ])
+            self.scanlines_clip.updateFields()
 
             # Get reference line geometry for distance calculation
             ref_line_feature = next(self.reference_line_layer.getFeatures())
             vertices = list(ref_line_feature.geometry().vertices())
-            line_start, line_end = vertices[0], vertices[1]
+            ref_line_start, ref_line_end = vertices[0], vertices[1]
 
-            # Group features by the new 'scanline_id'
+            # Group features by the original scanline ID
             features_by_scanline_id = defaultdict(list)
-            for feature in self.scanlines_clip.getFeatures():
-                scanline_id = feature['scanline_id']
+            for feature in single_parts_layer.getFeatures():
+                scanline_id = feature[scanline_id_field_name]
                 features_by_scanline_id[scanline_id].append(feature)
 
-            self.scanlines_clip.startEditing()
-            scanline_part_id_field_index = self.scanlines_clip.fields().indexOf('scanline_part_id')
-
+            new_features = []
             for scanline_id, features in features_by_scanline_id.items():
-                # Calculate distance for each feature and store it
+                # Sort parts by their proximity to the start of the reference line to create a consistent order
                 features_with_dist = []
                 for feature in features:
                     first_node = feature.geometry().vertexAt(0)
-                    distance = calculate_perpendicular_distance(first_node, line_start, line_end)
-                    features_with_dist.append((distance, feature))
+                    # This distance is just for sorting to create part numbers
+                    sorting_dist = calculate_perpendicular_distance(first_node, ref_line_start, ref_line_end)
+                    features_with_dist.append((sorting_dist, feature))
                 
-                # Sort features by distance
                 features_with_dist.sort(key=lambda x: x[0])
                 
-                # Assign the new scanline_part_id
+                # Assign new IDs and calculate midpoint distance
                 for i, (dist, feature) in enumerate(features_with_dist):
                     part_number = i + 1
                     new_part_id = f"{scanline_id}-{part_number}"
-                    self.scanlines_clip.changeAttributeValue(feature.id(), scanline_part_id_field_index, new_part_id)
+                    
+                    geom = feature.geometry()
+                    midpoint = geom.interpolate(geom.length() / 2.0).asPoint()
+                    distance_to_ref = calculate_perpendicular_distance(midpoint, ref_line_start, ref_line_end)
+                    
+                    new_feat = QgsFeature(self.scanlines_clip.fields())
+                    new_feat.setGeometry(geom)
+                    new_feat.setAttributes([scanline_id, new_part_id, distance_to_ref])
+                    new_features.append(new_feat)
 
-            if not self.scanlines_clip.commitChanges():
-                self.log_browser.append("ERROR: Could not commit changes for 'scanline_part_id'.")
-            else:
-                self.log_browser.append("'scanline_part_id' field populated successfully.")
+            provider.addFeatures(new_features)
+            self.log_browser.append("'scanlines_clip' layer created with simplified fields.")
             
             QgsProject.instance().addMapLayer(self.scanlines_clip)
-            self.log_browser.append("Temporary layer 'scanlines_clip' (single parts) created and added to canvas.")
+            self.log_browser.append("Temporary layer 'scanlines_clip' created and added to canvas.")
 
             # Apply style to scanlines_clip layer
             renderer = self.scanlines_layer.renderer()
@@ -528,21 +521,68 @@ class FracLineDockWidget(QgsDockWidget):
                 intersection_result = qgis.processing.run("native:lineintersections", {
                     'INPUT': self.scanlines_clip,
                     'INTERSECT': self.fractures_layer,
-                    'INPUT_FIELDS': [],
+                    'INPUT_FIELDS': ['scanline_id', 'scanline_part_id'],
                     'INTERSECT_FIELDS': [],
                     'OUTPUT': 'memory:',
                     'CRS': project_crs
                 })
-                self.intersections_layer = intersection_result['OUTPUT']
+                intersections_temp_layer = intersection_result['OUTPUT']
 
-                self.intersections_layer.setName('intersections')
+                # --- Create final intersections layer with simplified fields ---
+                self.intersections_layer = QgsVectorLayer(f"Point?crs={project_crs.toWkt()}", "intersections", "memory")
+                provider_int = self.intersections_layer.dataProvider()
+                provider_int.addAttributes([
+                    QgsField("scanline_id", QVariant.String),
+                    QgsField("scanline_part_id", QVariant.String),
+                    QgsField("distance", QVariant.Double)
+                ])
+                self.intersections_layer.updateFields()
+
+                intersection_features = []
+                for feature in intersections_temp_layer.getFeatures():
+                    scanline_id = feature['scanline_id']
+                    scanline_part_id = feature['scanline_part_id']
+                    
+                    point_geom = feature.geometry()
+                    distance_to_ref = calculate_perpendicular_distance(point_geom.asPoint(), ref_line_start, ref_line_end)
+                    
+                    new_feat = QgsFeature(self.intersections_layer.fields())
+                    new_feat.setGeometry(point_geom)
+                    new_feat.setAttributes([scanline_id, scanline_part_id, distance_to_ref])
+                    intersection_features.append(new_feat)
+                
+                provider_int.addFeatures(intersection_features)
+                self.log_browser.append("'intersections' layer created with simplified fields.")
+
+                # --- Final check: Remove intersection points with a unique scanline_part_id ---
+                self.log_browser.append("Filtering intersections: removing points from scanline parts with only one intersection...")
+                all_part_ids = [f['scanline_part_id'] for f in self.intersections_layer.getFeatures()]
+                id_counts = Counter(all_part_ids)
+                
+                ids_to_remove = {part_id for part_id, count in id_counts.items() if count == 1}
+                
+                if ids_to_remove:
+                    fids_to_delete = []
+                    for feature in self.intersections_layer.getFeatures():
+                        if feature['scanline_part_id'] in ids_to_remove:
+                            fids_to_delete.append(feature.id())
+                    
+                    self.intersections_layer.startEditing()
+                    self.intersections_layer.deleteFeatures(fids_to_delete)
+                    if not self.intersections_layer.commitChanges():
+                        self.log_browser.append("ERROR: Could not commit deletion of unique intersection points.")
+                    else:
+                        self.log_browser.append(f"Removed {len(fids_to_delete)} points from {len(ids_to_remove)} scanline parts.")
+                else:
+                    self.log_browser.append("No unique intersection points found to remove.")
+
+
                 QgsProject.instance().addMapLayer(self.intersections_layer)
                 self.log_browser.append("Temporary layer 'intersections' created and added to canvas.")
 
                 # --- Split scanlines_clip and filter segments ---
                 self.log_browser.append("Splitting scanlines and filtering segments...")
 
-                # Perform the split operation
                 split_result = qgis.processing.run("native:splitwithlines", {
                     'INPUT': self.scanlines_clip,
                     'LINES': self.fractures_layer,
@@ -550,125 +590,94 @@ class FracLineDockWidget(QgsDockWidget):
                     'CRS': project_crs
                 })
                 split_layer = split_result['OUTPUT']
-                split_layer.setName('temp_split_scanlines') # Give it a temporary name
-
-                if split_layer.featureCount() == 0:
-                    self.log_browser.append("Warning: Split operation resulted in an empty layer. No segments to process.")
-                    # Create an empty output layer if no splits occurred
-                    output_layer = QgsVectorLayer("LineString", "scanlines_clip_split", "memory")
-                    output_layer.setCrs(project_crs)
-                    # Copy fields from the original scanlines_clip layer
-                    output_layer.dataProvider().addAttributes(self.scanlines_clip.fields().toList()) 
-                    output_layer.updateFields()
-                    QgsProject.instance().addMapLayer(output_layer)
-                    self.scanlines_clip_split = output_layer
-                    self.log_browser.append("Empty 'scanlines_clip_split' layer created.")
-                    QgsProject.instance().removeMapLayer(split_layer.id()) # Clean up temp layer
-                    return
-
 
                 # Create output layer for filtered segments
-                output_layer = QgsVectorLayer("LineString", "scanlines_clip_split", "memory")
-                output_layer.setCrs(project_crs)
-                # Copy fields from the split_layer (which should have fields from scanlines_clip)
-                output_layer.dataProvider().addAttributes(split_layer.fields().toList())
-                output_layer.updateFields()
+                self.scanlines_clip_split = QgsVectorLayer(f"LineString?crs={project_crs.toWkt()}", "scanlines_clip_split", "memory")
+                provider_split = self.scanlines_clip_split.dataProvider()
+                provider_split.addAttributes([
+                    QgsField("scanline_id", QVariant.String),
+                    QgsField("scanline_part_id", QVariant.String),
+                    QgsField("distance", QVariant.Double)
+                ])
+                self.scanlines_clip_split.updateFields()
                 
                 output_features = []
                 segments_by_scanline_part = defaultdict(list)
 
-                # Group segments by their original scanline part ID
                 for feature in split_layer.getFeatures():
-                    # Use 'scanline_part_id' for grouping
                     scanline_part_id = feature['scanline_part_id']
                     segments_by_scanline_part[scanline_part_id].append(feature)
 
-                # Process each original scanline part's segments
+                # Create a lookup for the original scanline_clip geometries
+                original_geoms = {f['scanline_part_id']: f.geometry() for f in self.scanlines_clip.getFeatures()}
+
                 for scanline_part_id, segments in segments_by_scanline_part.items():
-                    if len(segments) <= 2: # If 0, 1, or 2 segments, remove all (first and last)
+                    # If a part is split into 4 or fewer segments, removing the first and last
+                    # would leave 2, 1, or 0 segments. The request is to remove these.
+                    if len(segments) <= 4:
                         continue 
 
-                    # Get the original unsplit scanline geometry to determine order
-                    request = QgsFeatureRequest().setFilterExpression(f"\"scanline_part_id\" = '{scanline_part_id}'")
-                    original_scanline_feature = next(self.scanlines_clip.getFeatures(request), None)
-                    
-                    if not original_scanline_feature:
-                        self.log_browser.append(f"Warning: Original scanline part with ID '{scanline_part_id}' not found in scanlines_clip for ordering.")
+                    original_geom = original_geoms.get(scanline_part_id)
+                    if not original_geom:
+                        self.log_browser.append(f"Warning: Original scanline part with ID '{scanline_part_id}' not found for ordering.")
                         continue
-
-                    original_geom = original_scanline_feature.geometry()
 
                     # Sort segments by their position along the original line
                     sorted_segments_with_dist = []
                     for segment_feature in segments:
-                        segment_geom = segment_feature.geometry()
-                        # Get the first point of the segment
-                        first_point_of_segment = segment_geom.asPolyline()[0]
-                        
-                        # Calculate distance along the original line
-                        distance = original_geom.lineLocatePoint(QgsGeometry.fromPointXY(first_point_of_segment))
-                        
-                        if distance >= 0: # lineLocatePoint returns -1 if point is not on line
-                            sorted_segments_with_dist.append((distance, segment_feature))
-                        else:
-                            self.log_browser.append(f"Warning: Segment for scanline part ID '{scanline_part_id}' could not be located on original line for sorting.")
+                        first_point_of_segment = segment_feature.geometry().asPolyline()[0]
+                        distance_along = original_geom.lineLocatePoint(QgsGeometry.fromPointXY(first_point_of_segment))
+                        sorted_segments_with_dist.append((distance_along, segment_feature))
 
                     sorted_segments_with_dist.sort(key=lambda x: x[0])
 
-                    # Filter segments: Exclude first and last
-                    segments_to_keep = [item[1] for item in sorted_segments_with_dist[1:-1]] # Exclude first and last
+                    # Keep only the middle segments
+                    segments_to_keep = [item[1] for item in sorted_segments_with_dist[1:-1]]
 
                     for segment_feature in segments_to_keep:
-                        new_feature = QgsFeature(output_layer.fields())
-                        new_feature.setGeometry(segment_feature.geometry())
-                        new_feature.setAttributes(segment_feature.attributes())
+                        scanline_id = segment_feature['scanline_id']
+                        
+                        geom = segment_feature.geometry()
+                        midpoint = geom.interpolate(geom.length() / 2.0).asPoint()
+                        distance_to_ref = calculate_perpendicular_distance(midpoint, ref_line_start, ref_line_end)
+                        
+                        new_feature = QgsFeature(self.scanlines_clip_split.fields())
+                        new_feature.setGeometry(geom)
+                        new_feature.setAttributes([scanline_id, scanline_part_id, distance_to_ref])
                         output_features.append(new_feature)
                 
-                output_layer.dataProvider().addFeatures(output_features)
-                QgsProject.instance().addMapLayer(output_layer)
-                self.scanlines_clip_split = output_layer
-                self.log_browser.append("Temporary layer 'scanlines_clip_split' created and added to canvas with filtered segments.")
+                provider_split.addFeatures(output_features)
+                QgsProject.instance().addMapLayer(self.scanlines_clip_split)
+                self.scanlines_clip_split = self.scanlines_clip_split
+                self.log_browser.append("Temporary layer 'scanlines_clip_split' created with filtered segments and simplified fields.")
 
                 # Apply style to scanlines_clip_split layer
                 if renderer and symbol:
                     new_symbol_split = symbol.clone()
-                    new_symbol_split.setWidth(symbol.width() * 2) # Same doubled thickness
+                    new_symbol_split.setWidth(symbol.width() * 2)
                     new_renderer_split = QgsSingleSymbolRenderer(new_symbol_split)
                     self.scanlines_clip_split.setRenderer(new_renderer_split)
                     self.scanlines_clip_split.triggerRepaint()
-                    self.log_browser.append("Style applied to 'scanlines_clip_split' with doubled line thickness.")
-                else:
-                    self.log_browser.append("Warning: Could not get renderer/symbol from scanlines layer. Cannot apply style to scanlines_clip_split.")
+                    self.log_browser.append("Style applied to 'scanlines_clip_split'.")
 
-
-                # Remove the temporary split_layer from the project if it was added
-                QgsProject.instance().removeMapLayer(split_layer.id())
-
-
-                # Style the intersection layer (existing code)
+                # Style the intersection layer
                 if renderer and symbol:
                     symbol_layer = symbol.symbolLayer(0)
                     if symbol_layer:
-                        # Convert QgsUnitTypes.RenderUnit enum to string for createSimple
                         unit_string = QgsUnitTypes.encodeUnit(symbol_layer.widthUnit())
-
                         point_symbol = QgsMarkerSymbol.createSimple({
                             'name': 'circle',
-                            'color': 'white',  # Fill color is white
-                            'outline_color': symbol_layer.color().name(), # Outline color from scanlines
-                            'outline_width': str(symbol_layer.width()), # Outline width same as scanlines line width
-                            'outline_width_unit': unit_string, # Use converted unit string
+                            'color': 'white',
+                            'outline_color': symbol_layer.color().name(),
+                            'outline_width': str(symbol_layer.width()),
+                            'outline_width_unit': unit_string,
                             'size': str(symbol_layer.width() * 6),
-                            'size_unit': unit_string # Use converted unit string
+                            'size_unit': unit_string
                         })
                         point_renderer = QgsSingleSymbolRenderer(point_symbol)
                         self.intersections_layer.setRenderer(point_renderer)
                         self.intersections_layer.triggerRepaint()
                         self.log_browser.append("Style applied to 'intersections' layer.")
-                    else:
-                        self.log_browser.append("Warning: Could not get symbol layer from scanlines layer. Cannot apply style to intersections.")
-                else:
-                    self.log_browser.append("Warning: Could not get style from scanlines layer. Cannot apply style to intersections.")
 
             else:
                 self.log_browser.append("No fractures layer selected. Skipping intersection and splitting.")
