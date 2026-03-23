@@ -542,7 +542,8 @@ class FracLineDockWidget(QgsDockWidget):
         provider_split.addAttributes([
             QgsField("scanline_id", QVariant.String),
             QgsField("scanline_part_id", QVariant.String),
-            QgsField("distance", QVariant.Double)
+            QgsField("distance", QVariant.Double),
+            QgsField("spacing", QVariant.Double)
         ])
         self.scanlines_clip_split.updateFields()
         
@@ -582,10 +583,18 @@ class FracLineDockWidget(QgsDockWidget):
                 geom = segment_feature.geometry()
                 midpoint_geom = geom.interpolate(geom.length() / 2.0)
                 distance_to_ref = midpoint_geom.distance(ref_line_geom)
+
+                vertices = list(geom.vertices())
+                first_point_geom = QgsGeometry.fromPoint(vertices[0])
+                last_point_geom = QgsGeometry.fromPoint(vertices[-1])
+
+                dist_first = first_point_geom.distance(ref_line_geom)
+                dist_last = last_point_geom.distance(ref_line_geom)
+                spacing = abs(dist_last - dist_first)
                 
                 new_feature = QgsFeature(self.scanlines_clip_split.fields())
                 new_feature.setGeometry(geom)
-                new_feature.setAttributes([scanline_id, scanline_part_id, distance_to_ref])
+                new_feature.setAttributes([scanline_id, scanline_part_id, distance_to_ref, spacing])
                 output_features.append(new_feature)
         
         provider_split.addFeatures(output_features)
