@@ -35,12 +35,13 @@ from qgis.core import (
     QgsVectorLayer, # Added
     QgsFeature,     # Added
     QgsGeometry,    # Added
-    QgsFeatureRequest # Added
+    QgsFeatureRequest, # Added
+    QgsFieldProxyModel
 )
-from qgis.gui import QgsMapLayerComboBox, QgsDockWidget
+from qgis.gui import QgsMapLayerComboBox, QgsDockWidget, QgsFieldComboBox
 from collections import defaultdict # Added
 
-def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_polygon=False):
+def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_polygon=False, skip_id_check=False):
     """
     Validates the input layer.
     For lines: checks that they are not "disconnected" multipart geometries.
@@ -52,14 +53,15 @@ def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_
 
     # Check for a text field called ID or id
     id_field_name = None
-    if 'ID' in layer.fields().names():
-        id_field_name = 'ID'
-    elif 'id' in layer.fields().names():
-        id_field_name = 'id'
-    else:
-        raise QgsProcessingException(
-            f'Layer {name} must have a text field called ID or id.'
-        )
+    if not skip_id_check:
+        if 'ID' in layer.fields().names():
+            id_field_name = 'ID'
+        elif 'id' in layer.fields().names():
+            id_field_name = 'id'
+        else:
+            raise QgsProcessingException(
+                f'Layer {name} must have a text field called ID or id.'
+            )
 
     ids = set()
     for feature in layer.getFeatures():
@@ -85,7 +87,7 @@ def check_layer(layer, name, is_reference_line=False, check_unique_id=False, is_
                     f'Feature {feature.id()} in {name} is not a segment with exactly two nodes. It has {len(vertices)} nodes.'
                 )
         
-        if check_unique_id:
+        if check_unique_id and id_field_name:
             feature_id = feature[id_field_name]
             if feature_id in ids:
                 raise QgsProcessingException(
@@ -185,6 +187,9 @@ class FracLineDockWidget(QgsDockWidget):
         self.scanlines_combo.setAllowEmptyLayer(True)
         self.scanlines_combo.setCurrentIndex(0)
 
+        self.scanline_id_field_combo = QgsFieldComboBox(self)
+        self.scanline_id_field_combo.setFilters(QgsFieldProxyModel.String)
+
         self.reference_line_combo = QgsMapLayerComboBox(self)
         self.reference_line_combo.setAllowEmptyLayer(True)
         self.reference_line_combo.setCurrentIndex(0)
@@ -208,6 +213,8 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(self.fractures_combo)
         layout.addWidget(QLabel('Scanlines:'))
         layout.addWidget(self.scanlines_combo)
+        layout.addWidget(QLabel('Scanline ID Field:'))
+        layout.addWidget(self.scanline_id_field_combo)
         layout.addWidget(QLabel('Reference line:'))
         layout.addWidget(self.reference_line_combo)
         layout.addWidget(QLabel('Interpretation boundary:'))
@@ -223,12 +230,29 @@ class FracLineDockWidget(QgsDockWidget):
         # Connect signals
         self.fractures_combo.layerChanged.connect(self.validate_layers)
         self.scanlines_combo.layerChanged.connect(self.validate_layers)
+        self.scanlines_combo.layerChanged.connect(self.update_scanline_id_field_combo)
         self.reference_line_combo.layerChanged.connect(self.validate_layers)
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
         self.run_button.clicked.connect(self.run_analysis)
 
         self.find_and_set_layers()
         self.validate_layers()
+
+    def update_scanline_id_field_combo(self, layer):
+        self.scanline_id_field_combo.setLayer(layer)
+        if layer:
+            # Try to pre-select 'scanline_id' or 'ID' or 'id'
+            field_name_to_find = 'scanline_id'
+            idx = layer.fields().indexOf(field_name_to_find)
+            if idx == -1:
+                field_name_to_find = 'ID'
+                idx = layer.fields().indexOf(field_name_to_find)
+            if idx == -1:
+                field_name_to_find = 'id'
+                idx = layer.fields().indexOf(field_name_to_find)
+            
+            if idx != -1:
+                self.scanline_id_field_combo.setCurrentIndex(idx)
 
     def find_and_set_layers(self):
         """Finds layers with specific names and sets them in the combo boxes."""
@@ -241,7 +265,10 @@ class FracLineDockWidget(QgsDockWidget):
 
         for layer in QgsProject.instance().mapLayers().values():
             if layer.name() in layer_map:
-                layer_map[layer.name()].setLayer(layer)
+                combo = layer_map[layer.name()]
+                combo.setLayer(layer)
+                if layer.name() == 'scanlines':
+                    self.update_scanline_id_field_combo(layer)
 
     def validate_layers(self):
         self.log_browser.clear()
@@ -280,7 +307,7 @@ class FracLineDockWidget(QgsDockWidget):
             self.scanlines_layer = self.scanlines_combo.currentLayer()
             if self.scanlines_layer:
                 self.log_browser.append('Validating Scanlines layer...')
-                check_layer(self.scanlines_layer, 'Scanlines', check_unique_id=True)
+                check_layer(self.scanlines_layer, 'Scanlines', skip_id_check=True)
                 self.log_browser.append('Scanlines layer validated successfully.')
 
             self.reference_line_layer = self.reference_line_combo.currentLayer()
@@ -292,7 +319,7 @@ class FracLineDockWidget(QgsDockWidget):
             self.boundary_layer = self.interpretation_boundary_combo.currentLayer()
             if self.boundary_layer:
                 self.log_browser.append('Validating Interpretation boundary layer...')
-                check_layer(self.boundary_layer, 'Interpretation boundary', is_polygon=True)
+                check_layer(self.boundary_layer, 'Interpretation boundary', is_polygon=True, skip_id_check=True)
                 self.log_browser.append('Interpretation boundary layer validated successfully.')
 
         except Exception as e:
@@ -301,13 +328,44 @@ class FracLineDockWidget(QgsDockWidget):
     def run_analysis(self):
         self.log_browser.append("==================================================")
         self.log_browser.append("Running analysis...")
-
-        if not self.scanlines_layer or not self.boundary_layer:
-            self.log_browser.append("ERROR: Both scanlines and interpretation boundary layers must be selected.")
-            return
-
+        
         # Get project CRS
         project_crs = QgsProject.instance().crs()
+
+        # Get selected scanline ID field
+        scanline_id_field_name = self.scanline_id_field_combo.currentField()
+        if not scanline_id_field_name:
+            self.log_browser.append("ERROR: Scanline ID Field must be selected.")
+            return
+
+        # Check layers availability
+        if not self.fractures_layer:
+            self.log_browser.append("ERROR: fractures layer must be selected.")
+            return
+        if not self.scanlines_layer:
+            self.log_browser.append("ERROR: scanlines layer must be selected.")
+            return
+        if not self.reference_line_layer:
+            self.log_browser.append("ERROR: reference line must be selected.")
+            return
+        if not self.boundary_layer:
+            self.log_browser.append("ERROR: interpretation boundary layer must be selected.")
+            return
+
+        # Uniqueness check for the selected scanline ID field
+        self.log_browser.append(f"Validating uniqueness of '{scanline_id_field_name}' in '{self.scanlines_layer.name()}'...")
+        ids = set()
+        for feature in self.scanlines_layer.getFeatures():
+            try:
+                feature_id = feature[scanline_id_field_name]
+                if feature_id in ids:
+                    self.log_browser.append(f"ERROR: Duplicate ID '{feature_id}' found in layer '{self.scanlines_layer.name()}'. IDs must be unique.")
+                    return
+                ids.add(feature_id)
+            except KeyError:
+                self.log_browser.append(f"ERROR: Field '{scanline_id_field_name}' not found in '{self.scanlines_layer.name()}'.")
+                return
+        self.log_browser.append("Scanline ID field validated for uniqueness.")
 
         # Check for existing 'scanlines_clip' layer
         existing_clip_layer = QgsProject.instance().mapLayersByName('scanlines_clip')
@@ -327,6 +385,23 @@ class FracLineDockWidget(QgsDockWidget):
                     QgsProject.instance().removeMapLayer(existing_clip_layer.id())
                     self.log_browser.append("Existing 'scanlines_clip' layer removed.")
 
+        # Check for existing 'scanlines_clip_split' layer
+        existing_split_layer = QgsProject.instance().mapLayersByName('scanlines_clip_split')
+        if existing_split_layer:
+            existing_split_layer = existing_split_layer[0]
+            if existing_split_layer.source().startswith('/') or existing_split_layer.source().startswith('file://'):
+                self.log_browser.append("ERROR: A file-based layer named 'scanlines_clip_split' already exists. Aborting to prevent overwrite.")
+                return
+            else:
+                reply = QMessageBox.question(self, 'Overwrite Layer?',
+                                             "A temporary layer named 'scanlines_clip_split' already exists. Do you want to overwrite it?",
+                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.No:
+                    self.log_browser.append("Split scanlines analysis aborted by user.")
+                    return
+                else:
+                    QgsProject.instance().removeMapLayer(existing_split_layer.id())
+                    self.log_browser.append("Existing 'scanlines_clip_split' layer removed.")
 
         self.log_browser.append("Clipping scanlines to boundary...")
         try:
@@ -347,6 +422,63 @@ class FracLineDockWidget(QgsDockWidget):
 
             self.scanlines_clip = singleparts_result['OUTPUT']
             self.scanlines_clip.setName('scanlines_clip')
+            
+            # --- Rename field and add scanline_part_id ---
+            self.log_browser.append("Renaming ID field and adding 'scanline_part_id'...")
+            
+            provider = self.scanlines_clip.dataProvider()
+            
+            # Rename the original ID field to 'scanline_id'
+            original_field_index = self.scanlines_clip.fields().indexOf(scanline_id_field_name)
+            if original_field_index != -1:
+                provider.renameAttributes({original_field_index: 'scanline_id'})
+                self.scanlines_clip.updateFields()
+                self.log_browser.append(f"Field '{scanline_id_field_name}' renamed to 'scanline_id'.")
+            else:
+                self.log_browser.append(f"Warning: Could not find field '{scanline_id_field_name}' to rename.")
+
+            # Add the new 'scanline_part_id' field
+            if self.scanlines_clip.fields().indexOf('scanline_part_id') == -1:
+                provider.addAttributes([QgsField("scanline_part_id", QVariant.String)])
+                self.scanlines_clip.updateFields()
+                self.log_browser.append("Field 'scanline_part_id' added.")
+
+            # Get reference line geometry for distance calculation
+            ref_line_feature = next(self.reference_line_layer.getFeatures())
+            vertices = list(ref_line_feature.geometry().vertices())
+            line_start, line_end = vertices[0], vertices[1]
+
+            # Group features by the new 'scanline_id'
+            features_by_scanline_id = defaultdict(list)
+            for feature in self.scanlines_clip.getFeatures():
+                scanline_id = feature['scanline_id']
+                features_by_scanline_id[scanline_id].append(feature)
+
+            self.scanlines_clip.startEditing()
+            scanline_part_id_field_index = self.scanlines_clip.fields().indexOf('scanline_part_id')
+
+            for scanline_id, features in features_by_scanline_id.items():
+                # Calculate distance for each feature and store it
+                features_with_dist = []
+                for feature in features:
+                    first_node = feature.geometry().vertexAt(0)
+                    distance = calculate_perpendicular_distance(first_node, line_start, line_end)
+                    features_with_dist.append((distance, feature))
+                
+                # Sort features by distance
+                features_with_dist.sort(key=lambda x: x[0])
+                
+                # Assign the new scanline_part_id
+                for i, (dist, feature) in enumerate(features_with_dist):
+                    part_number = i + 1
+                    new_part_id = f"{scanline_id}-{part_number}"
+                    self.scanlines_clip.changeAttributeValue(feature.id(), scanline_part_id_field_index, new_part_id)
+
+            if not self.scanlines_clip.commitChanges():
+                self.log_browser.append("ERROR: Could not commit changes for 'scanline_part_id'.")
+            else:
+                self.log_browser.append("'scanline_part_id' field populated successfully.")
+            
             QgsProject.instance().addMapLayer(self.scanlines_clip)
             self.log_browser.append("Temporary layer 'scanlines_clip' (single parts) created and added to canvas.")
 
@@ -393,96 +525,22 @@ class FracLineDockWidget(QgsDockWidget):
                             QgsProject.instance().removeMapLayer(existing_intersections_layer.id())
                             self.log_browser.append("Existing 'intersections' layer removed.")
 
-                # Determine the ID field name from scanlines_clip
-                scanline_id_field_name = None
-                scanlines_fields = self.scanlines_clip.fields()
-                if 'ID' in scanlines_fields.names():
-                    scanline_id_field_name = 'ID'
-                elif 'id' in scanlines_fields.names():
-                    scanline_id_field_name = 'id'
-
-                if not scanline_id_field_name:
-                    self.log_browser.append("ERROR: Could not find 'ID' or 'id' field in 'scanlines_clip' layer.")
-                    return
-
                 intersection_result = qgis.processing.run("native:lineintersections", {
                     'INPUT': self.scanlines_clip,
                     'INTERSECT': self.fractures_layer,
-                    'INPUT_FIELDS': [scanline_id_field_name],
+                    'INPUT_FIELDS': [],
                     'INTERSECT_FIELDS': [],
                     'OUTPUT': 'memory:',
-                    'CRS': project_crs # Set output CRS to project CRS
+                    'CRS': project_crs
                 })
                 self.intersections_layer = intersection_result['OUTPUT']
 
-                # Rename the field to 'scanline_id'
-                provider = self.intersections_layer.dataProvider()
-                field_index = self.intersections_layer.fields().indexOf(scanline_id_field_name)
-                if field_index != -1:
-                    provider.renameAttributes({field_index: 'scanline_id'})
-                    self.intersections_layer.updateFields()
-
-                # Remove 'ID_2' field if it exists
-                id2_field_index = self.intersections_layer.fields().indexOf('ID_2')
-                if id2_field_index != -1:
-                    provider.deleteAttributes([id2_field_index])
-                    self.intersections_layer.updateFields()
-
                 self.intersections_layer.setName('intersections')
                 QgsProject.instance().addMapLayer(self.intersections_layer)
-                self.log_browser.append("Temporary layer 'intersections' created and added to canvas with 'scanline_id' field.")
-
-                # Calculate and add distance field if reference line is present
-                if self.reference_line_layer:
-                    self.log_browser.append("Calculating distances to reference line...")
-                    
-                    # Get the reference line geometry
-                    ref_line_feature = next(self.reference_line_layer.getFeatures())
-                    vertices = list(ref_line_feature.geometry().vertices())
-                    line_start, line_end = vertices[0], vertices[1]
-
-                    # Add 'distance' field
-                    provider = self.intersections_layer.dataProvider()
-                    if provider.fieldNameIndex('distance') == -1:
-                        provider.addAttributes([QgsField("distance", QVariant.Double)])
-                        self.intersections_layer.updateFields()
-
-                    distance_field_index = self.intersections_layer.fields().indexOf('distance')
-
-                    # Calculate and update distances for each intersection point
-                    self.intersections_layer.startEditing()
-                    for feature in self.intersections_layer.getFeatures():
-                        intersection_point = feature.geometry().asPoint()
-                        distance = calculate_perpendicular_distance(intersection_point, line_start, line_end)
-                        self.intersections_layer.changeAttributeValue(feature.id(), distance_field_index, float(distance))
-                    
-                    if not self.intersections_layer.commitChanges():
-                        self.log_browser.append("ERROR: Could not commit changes to intersections layer for distances.")
-                    else:
-                        self.log_browser.append("Distances calculated and added to 'intersections' layer.")
-                else:
-                    self.log_browser.append("No reference line selected. Skipping distance calculation.")
+                self.log_browser.append("Temporary layer 'intersections' created and added to canvas.")
 
                 # --- Split scanlines_clip and filter segments ---
                 self.log_browser.append("Splitting scanlines and filtering segments...")
-
-                # Check for existing 'scanlines_clip_split' layer
-                existing_split_layer = QgsProject.instance().mapLayersByName('scanlines_clip_split')
-                if existing_split_layer:
-                    existing_split_layer = existing_split_layer[0]
-                    if existing_split_layer.source().startswith('/') or existing_split_layer.source().startswith('file://'):
-                        self.log_browser.append("ERROR: A file-based layer named 'scanlines_clip_split' already exists. Aborting to prevent overwrite.")
-                        return
-                    else:
-                        reply = QMessageBox.question(self, 'Overwrite Layer?',
-                                                     "A temporary layer named 'scanlines_clip_split' already exists. Do you want to overwrite it?",
-                                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                        if reply == QMessageBox.No:
-                            self.log_browser.append("Split scanlines analysis aborted by user.")
-                            return
-                        else:
-                            QgsProject.instance().removeMapLayer(existing_split_layer.id())
-                            self.log_browser.append("Existing 'scanlines_clip_split' layer removed.")
 
                 # Perform the split operation
                 split_result = qgis.processing.run("native:splitwithlines", {
@@ -517,30 +575,25 @@ class FracLineDockWidget(QgsDockWidget):
                 output_layer.updateFields()
                 
                 output_features = []
-                segments_by_scanline = defaultdict(list)
+                segments_by_scanline_part = defaultdict(list)
 
-                # Group segments by their original scanline ID
+                # Group segments by their original scanline part ID
                 for feature in split_layer.getFeatures():
-                    # Use the determined scanline_id_field_name for grouping
-                    scanline_id = feature[scanline_id_field_name]
-                    segments_by_scanline[scanline_id].append(feature)
+                    # Use 'scanline_part_id' for grouping
+                    scanline_part_id = feature['scanline_part_id']
+                    segments_by_scanline_part[scanline_part_id].append(feature)
 
-                # Process each original scanline's segments
-                for scanline_id, segments in segments_by_scanline.items():
+                # Process each original scanline part's segments
+                for scanline_part_id, segments in segments_by_scanline_part.items():
                     if len(segments) <= 2: # If 0, 1, or 2 segments, remove all (first and last)
                         continue 
 
                     # Get the original unsplit scanline geometry to determine order
-                    original_scanline_feature = None
-                    # Use the original scanlines_clip layer to get the full geometry
-                    # Need to use a request with the correct field name
-                    request = QgsFeatureRequest().setFilterExpression(f"\"{scanline_id_field_name}\" = '{scanline_id}'")
-                    for f in self.scanlines_clip.getFeatures(request):
-                        original_scanline_feature = f
-                        break
+                    request = QgsFeatureRequest().setFilterExpression(f"\"scanline_part_id\" = '{scanline_part_id}'")
+                    original_scanline_feature = next(self.scanlines_clip.getFeatures(request), None)
                     
                     if not original_scanline_feature:
-                        self.log_browser.append(f"Warning: Original scanline with ID '{scanline_id}' not found in scanlines_clip for ordering.")
+                        self.log_browser.append(f"Warning: Original scanline part with ID '{scanline_part_id}' not found in scanlines_clip for ordering.")
                         continue
 
                     original_geom = original_scanline_feature.geometry()
@@ -550,7 +603,6 @@ class FracLineDockWidget(QgsDockWidget):
                     for segment_feature in segments:
                         segment_geom = segment_feature.geometry()
                         # Get the first point of the segment
-                        # QgsGeometry.asPolyline() returns a list of QgsPointXY
                         first_point_of_segment = segment_geom.asPolyline()[0]
                         
                         # Calculate distance along the original line
@@ -559,7 +611,7 @@ class FracLineDockWidget(QgsDockWidget):
                         if distance >= 0: # lineLocatePoint returns -1 if point is not on line
                             sorted_segments_with_dist.append((distance, segment_feature))
                         else:
-                            self.log_browser.append(f"Warning: Segment for scanline ID '{scanline_id}' could not be located on original line for sorting.")
+                            self.log_browser.append(f"Warning: Segment for scanline part ID '{scanline_part_id}' could not be located on original line for sorting.")
 
                     sorted_segments_with_dist.sort(key=lambda x: x[0])
 
