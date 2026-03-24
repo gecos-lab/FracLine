@@ -170,6 +170,8 @@ class FracLineDockWidget(QgsDockWidget):
         self.fractures_layer = None
         self.intersections_layer = None
         self.scanlines_clip_split = None
+        self.max_distance = 0
+        self.plot_widget = None
 
         # Create widgets
         self.fractures_combo = QgsMapLayerComboBox(self)
@@ -194,12 +196,12 @@ class FracLineDockWidget(QgsDockWidget):
         self.log_browser = QTextBrowser(self)
         self.measure_button = QPushButton("Measure spacing and distance")
         
-        self.barcode_height_spinbox = QSpinBox()
-        self.barcode_height_spinbox.setRange(1, 100)
-        self.barcode_height_spinbox.setValue(10)
+        self.barcode_ar_spinbox = QSpinBox()
+        self.barcode_ar_spinbox.setRange(1, 50)
+        self.barcode_ar_spinbox.setValue(10)
 
         self.barcode_color_combo = QComboBox()
-        self.barcode_color_combo.addItems(['Black', 'Red', 'Green', 'Blue', 'Cyan', 'Magenta', 'Yellow', 'Orange', 'Purple', 'Grey'])
+        self.barcode_color_combo.addItems(['black', 'red', 'green', 'blue', 'cyan', 'magenta', 'yellow', 'orange', 'purple', 'darkgreen', 'grey'])
 
         self.run_scanline_analysis_button = QPushButton("Run analysis on scanlines")
         self.run_scanline_analysis_button.setEnabled(False)
@@ -225,8 +227,8 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addWidget(self.measure_button)
         
         barcode_layout = QHBoxLayout()
-        barcode_layout.addWidget(QLabel("Barcode Height:"))
-        barcode_layout.addWidget(self.barcode_height_spinbox)
+        barcode_layout.addWidget(QLabel("Barcode A/R:"))
+        barcode_layout.addWidget(self.barcode_ar_spinbox)
         barcode_layout.addWidget(QLabel("Barcode Color:"))
         barcode_layout.addWidget(self.barcode_color_combo)
         layout.addLayout(barcode_layout)
@@ -246,6 +248,7 @@ class FracLineDockWidget(QgsDockWidget):
         self.reference_line_combo.layerChanged.connect(self.validate_layers)
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
         self.measure_button.clicked.connect(self.run_analysis)
+        self.run_scanline_analysis_button.clicked.connect(self.run_scanline_analysis)
 
         self.find_and_set_layers()
         self.validate_layers()
@@ -719,6 +722,16 @@ class FracLineDockWidget(QgsDockWidget):
             ref_line_feature = next(self.reference_line_layer.getFeatures())
             ref_line_geom = ref_line_feature.geometry()
 
+            # Calculate max_distance
+            self.max_distance = 0
+            for feature in self.scanlines_layer.getFeatures():
+                for vertex in feature.geometry().vertices():
+                    dist = ref_line_geom.distance(QgsGeometry.fromPoint(vertex))
+                    if dist > self.max_distance:
+                        self.max_distance = dist
+            self.log_browser.append(f"Max distance to reference line calculated: {self.max_distance}")
+
+
             self.scanlines_clip = self._prepare_scanlines_clip(
                 project_crs, scanline_id_field_name, ref_line_geom, output_group
             )
@@ -745,3 +758,67 @@ class FracLineDockWidget(QgsDockWidget):
 
         except Exception as e:
             self.log_browser.append(f"ERROR during analysis: {e}")
+
+    def run_scanline_analysis(self):
+        if not self.plot_widget:
+            self.plot_widget = FracLinePlotWidget(self.iface)
+            self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
+        self.plot_widget.show()
+
+        barcode_ar = 1/self.barcode_ar_spinbox.value()
+        barcode_color = self.barcode_color_combo.currentText()
+
+        plot_data = defaultdict(lambda: {'distances': [], 'spacings': [], 'intersection_distances': []})
+
+
+        # Get data from scanlines_clip_split
+        max_spacing = 0.0
+        for feature in self.scanlines_clip_split.getFeatures():
+            scanline_id = feature['scanline_id']
+            plot_data[scanline_id]['distances'].append(feature['distance'])
+            plot_data[scanline_id]['spacings'].append(feature['spacing'])
+            if feature['spacing'] > max_spacing:
+                max_spacing = feature['spacing']
+
+        # Get data from intersections
+        for feature in self.intersections_layer.getFeatures():
+            scanline_id = feature['scanline_id']
+            plot_data[scanline_id]['intersection_distances'].append(feature['distance'])
+
+        scanline_ids = sorted(plot_data.keys())
+        num_scanlines = len(scanline_ids)
+
+        if num_scanlines == 0:
+            self.log_browser.append("No data to plot.")
+            return
+
+        fig = self.plot_widget.figure1
+        fig.clear()
+
+        axes = fig.subplots(nrows=num_scanlines, ncols=1, sharex=True)
+        if num_scanlines == 1:
+            axes = [axes]
+
+        for i, scanline_id in enumerate(scanline_ids):
+            ax = axes[i]
+            ax.set_aspect(barcode_ar, adjustable='box')
+            data = plot_data[scanline_id]
+            
+            # Sort by distance for correct plotting
+            sorted_data = sorted(zip(data['distances'], data['spacings']))
+            if sorted_data:
+                distances, spacings = zip(*sorted_data)
+                ax.plot(distances, spacings)
+                ax.vlines(data['intersection_distances'], 0, (max_spacing*1.2), color=barcode_color)
+
+            ax.yaxis.set_label_position('right')
+            ax.set_ylabel(scanline_id, rotation=0, labelpad=30)
+
+        axes[-1].set_xlim(0, self.max_distance)
+
+        fig.supxlabel("Distance to reference line")
+        fig.supylabel("Spacing")
+
+        fig.tight_layout()
+        self.plot_widget.canvas1.draw()
+        self.log_browser.append("Scanline analysis plot generated.")
