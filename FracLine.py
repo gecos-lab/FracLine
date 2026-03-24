@@ -194,6 +194,8 @@ class FracLineDockWidget(QgsDockWidget):
         self.scanlines_clip_split = None
         self.max_distance = 0
         self.plot_widget = None
+        self.scanline_ids = []
+        self.num_scanlines = 0
 
         # Create widgets
         self.fractures_combo = QgsMapLayerComboBox(self)
@@ -277,8 +279,15 @@ class FracLineDockWidget(QgsDockWidget):
         )
         self.nodata_color_combo.setCurrentIndex(1)
 
-        self.run_scanline_analysis_button = QPushButton("Run analysis on scanlines")
-        self.run_scanline_analysis_button.setEnabled(False)
+        self.plot_barcodes_button = QPushButton("Plot barcodes and spacing")
+        self.plot_barcodes_button.setEnabled(False)
+
+        self.selct_scanline_combo = QComboBox()
+        self.selct_scanline_combo.addItems(self.scanline_ids)
+        self.selct_scanline_combo.setEnabled(False)
+
+        self.run_stats_button = QPushButton("Run statistics for selected scanline")
+        self.run_stats_button.setEnabled(False)
 
         # Set layer filters
         self.fractures_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
@@ -316,8 +325,15 @@ class FracLineDockWidget(QgsDockWidget):
         spacing_layout.addWidget(self.nodata_color_combo)
         layout.addLayout(spacing_layout)
 
-        layout.addWidget(self.run_scanline_analysis_button)
-        layout.addWidget(QLabel("Log:"))
+        layout.addWidget(self.plot_barcodes_button)
+
+        select_scan_layout = QHBoxLayout()
+        select_scan_layout.addWidget(QLabel("Selected scanline:"))
+        select_scan_layout.addWidget(self.selct_scanline_combo)
+        layout.addLayout(select_scan_layout)
+
+        layout.addWidget(self.run_stats_button)
+
         layout.addWidget(self.log_browser)
 
         widget = QWidget()
@@ -331,10 +347,21 @@ class FracLineDockWidget(QgsDockWidget):
         self.reference_line_combo.layerChanged.connect(self.validate_layers)
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
         self.measure_button.clicked.connect(self.run_analysis)
-        self.run_scanline_analysis_button.clicked.connect(self.run_scanline_analysis)
+        self.plot_barcodes_button.clicked.connect(self.plot_barcodes)
+        self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
 
         self.find_and_set_layers()
         self.validate_layers()
+        self.update_scanline_list()
+
+    def update_scanline_list(self):
+        # Get unique scanline_ids from the layer
+        scanline_ids = set()
+        if self.scanlines_clip_split:
+            for feature in self.scanlines_clip_split.getFeatures():
+                scanline_ids.add(feature["scanline_id"])
+        self.scanline_ids = sorted(list(scanline_ids))
+        self.num_scanlines = len(self.scanline_ids)
 
     def update_scanline_id_field_combo(self, layer):
         self.scanline_id_field_combo.setLayer(layer)
@@ -969,7 +996,12 @@ class FracLineDockWidget(QgsDockWidget):
                     return
 
                 if self.intersections_layer and self.scanlines_clip_split:
-                    self.run_scanline_analysis_button.setEnabled(True)
+                    self.update_scanline_list()
+                    self.plot_barcodes_button.setEnabled(True)
+                    self.selct_scanline_combo.setEnabled(True)
+                    self.selct_scanline_combo.clear()
+                    self.selct_scanline_combo.addItems(self.scanline_ids)
+                    self.run_stats_button.setEnabled(True)
             else:
                 self.log_browser.append(
                     "No fractures layer selected. Skipping intersection and splitting."
@@ -978,7 +1010,7 @@ class FracLineDockWidget(QgsDockWidget):
         except Exception as e:
             self.log_browser.append(f"ERROR during analysis: {e}")
 
-    def run_scanline_analysis(self):
+    def plot_barcodes(self):
         if not self.plot_widget:
             self.plot_widget = FracLinePlotWidget(self.iface)
             self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
@@ -1011,10 +1043,11 @@ class FracLineDockWidget(QgsDockWidget):
                 default=0.0,
             )
 
-        fig = self.plot_widget.figure1
-        fig.clear()
+        # Figure 1 - barcode plots
+        fig1 = self.plot_widget.figure1
+        fig1.clear()
 
-        axes = fig.subplots(nrows=num_scanlines, ncols=1, sharex=True)
+        axes = fig1.subplots(nrows=num_scanlines, ncols=1, sharex=True)
         if num_scanlines == 1:
             axes = [axes]
 
@@ -1038,13 +1071,13 @@ class FracLineDockWidget(QgsDockWidget):
                     intersection_distances = []
                     start = None
                     end = None
+                    request = QgsFeatureRequest().setFilterExpression(
+                        f'"scanline_part_id" = \'{part_id}\' AND "scanline_id" = \'{scanline_id}\''
+                    )
 
                     # Data from scanlines_clip
-                    request_box = QgsFeatureRequest().setFilterExpression(
-                        f'"scanline_part_id" = \'{part_id}\' AND "scanline_id" = {scanline_id}'
-                    )
                     if self.scanlines_clip:
-                        for feature in self.scanlines_clip.getFeatures(request_box):
+                        for feature in self.scanlines_clip.getFeatures(request):
                             start = feature["start"]
                             end = feature["end"]
                             ax.fill(
@@ -1054,24 +1087,14 @@ class FracLineDockWidget(QgsDockWidget):
                             )
 
                     # Data from scanlines_clip_split
-                    request_spc = QgsFeatureRequest().setFilterExpression(
-                        f'"scanline_part_id" = \'{part_id}\' AND "scanline_id" = {scanline_id}'
-                    )
                     if self.scanlines_clip_split:
-                        for feature in self.scanlines_clip_split.getFeatures(
-                            request_spc
-                        ):
+                        for feature in self.scanlines_clip_split.getFeatures(request):
                             distances.append(feature["distance"])
                             spacings.append(feature["spacing"])
 
                     # Data from intersections
-                    request_int = QgsFeatureRequest().setFilterExpression(
-                        f'"scanline_part_id" = \'{part_id}\' AND "scanline_id" = {scanline_id}'
-                    )
                     if self.intersections_layer:
-                        for feature in self.intersections_layer.getFeatures(
-                            request_int
-                        ):
+                        for feature in self.intersections_layer.getFeatures(request):
                             intersection_distances.append(feature["distance"])
 
                     if intersection_distances:
@@ -1100,9 +1123,64 @@ class FracLineDockWidget(QgsDockWidget):
 
         axes[-1].set_xlim(0, self.max_distance)
 
-        fig.supxlabel("Distance to reference line")
-        fig.supylabel("Spacing")
+        fig1.supxlabel("Distance to reference line")
+        fig1.supylabel("Spacing")
 
-        fig.tight_layout()
+        fig1.tight_layout()
         self.plot_widget.canvas1.draw()
         self.log_browser.append("Scanline analysis plot generated.")
+
+    def run_stats_for_scanline(self):
+        if not self.plot_widget:
+            self.plot_widget = FracLinePlotWidget(self.iface)
+            self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
+        self.plot_widget.show()
+
+        this_scanline_id = self.selct_scanline_combo.currentText()
+        if not this_scanline_id:
+            self.log_browser.append("ERROR: Scanline ID must be selected.")
+            return
+
+        # get data for scanline
+        distances = []
+        spacings = []
+        distances_order = []
+        spacings_order = []
+
+        # Data from scanlines_clip_split
+        request = QgsFeatureRequest().setFilterExpression(
+            f'"scanline_id" = \'{this_scanline_id}\''
+        )
+        if self.scanlines_clip_split:
+            for feature in self.scanlines_clip_split.getFeatures(request):
+                distances.append(feature["distance"])
+                spacings.append(feature["spacing"])
+                distances_order.append(feature["distance_order"])
+                spacings_order.append(feature["spacing_order"])
+
+        # Figure 2 - statistics
+        fig2 = self.plot_widget.figure2
+        fig2.clear()
+
+        axes = fig2.subplots(nrows=2, ncols=3)
+        ax11, ax12, ax13, ax21, ax22, ax23 = axes.flatten()
+
+        ax11.plot(distances, spacings, marker="o", markersize=4, linestyle="", color="blue")
+        ax11.set_xlabel("Distance [m]")
+        ax11.set_ylabel("Spacing [m]")
+
+        ax21.plot(distances_order, spacings_order, marker="o", markersize=4, linestyle="", color="blue")
+        ax21.set_xlabel("Distance [order]")
+        ax21.set_ylabel("Spacing [order]")
+
+        ax12.plot(spacings[0:-2], spacings[1:-1], marker="o", markersize=4, linestyle="", color="blue")
+        ax12.set_xlabel("Spacing @ i [m]")
+        ax12.set_ylabel("Spacing @ i+1 [m]")
+
+        ax22.plot(spacings_order[0:-2], spacings_order[1:-1], marker="o", markersize=4, linestyle="", color="blue")
+        ax22.set_xlabel("Spacing @ i [order]")
+        ax22.set_ylabel("Spacing @ i+1 [order]")
+
+        fig2.tight_layout()
+        self.plot_widget.canvas1.draw()
+        self.log_browser.append(f"Scanline {this_scanline_id} stats completed.")
