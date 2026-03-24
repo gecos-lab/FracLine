@@ -24,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QTextBrowser,
+    QTabWidget,
     QLabel,
     QPushButton,
     QMessageBox,
@@ -160,8 +161,9 @@ class FracLinePlotWidget(QgsDockWidget):
 
         # Main widget and layout
         main_widget = QWidget()
-        main_layout = QHBoxLayout()
-        main_widget.setLayout(main_layout)
+        main_layout = QVBoxLayout(main_widget)
+        tab_widget = QTabWidget()
+        main_layout.addWidget(tab_widget)
         self.setWidget(main_widget)
 
         # Create two figures and canvases
@@ -172,8 +174,8 @@ class FracLinePlotWidget(QgsDockWidget):
         self.canvas2 = FigureCanvas(self.figure2)
 
         # Add canvases to the layout
-        main_layout.addWidget(self.canvas1)
-        main_layout.addWidget(self.canvas2)
+        tab_widget.addTab(self.canvas1, "Barcode plots")
+        tab_widget.addTab(self.canvas2, "Statistics")
 
 
 class FracLineDockWidget(QgsDockWidget):
