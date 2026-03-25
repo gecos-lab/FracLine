@@ -31,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QSpinBox,
     QComboBox,
+    QCheckBox,
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
@@ -164,8 +165,8 @@ class FracLinePlotWidget(QgsDockWidget):
         # Main widget and layout
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
-        tab_widget = QTabWidget()
-        main_layout.addWidget(tab_widget)
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
         self.setWidget(main_widget)
 
         # Create two figures and canvases
@@ -176,8 +177,8 @@ class FracLinePlotWidget(QgsDockWidget):
         self.canvas2 = FigureCanvas(self.figure2)
 
         # Add canvases to the layout
-        tab_widget.addTab(self.canvas1, "Barcode plots")
-        tab_widget.addTab(self.canvas2, "Statistics")
+        self.tab_widget.addTab(self.canvas1, "Barcode plots")
+        self.tab_widget.addTab(self.canvas2, "Statistics")
 
 
 class FracLineDockWidget(QgsDockWidget):
@@ -288,6 +289,9 @@ class FracLineDockWidget(QgsDockWidget):
         self.selct_scanline_combo.addItems(self.scanline_ids)
         self.selct_scanline_combo.setEnabled(False)
 
+        self.show_labels_checkbox = QCheckBox("Show labels")
+        self.show_labels_checkbox.setEnabled(False)
+
         self.run_stats_button = QPushButton("Run statistics for selected scanline")
         self.run_stats_button.setEnabled(False)
 
@@ -332,6 +336,8 @@ class FracLineDockWidget(QgsDockWidget):
         select_scan_layout = QHBoxLayout()
         select_scan_layout.addWidget(QLabel("Selected scanline:"))
         select_scan_layout.addWidget(self.selct_scanline_combo)
+        select_scan_layout.addStretch()
+        select_scan_layout.addWidget(self.show_labels_checkbox)
         layout.addLayout(select_scan_layout)
 
         layout.addWidget(self.run_stats_button)
@@ -1015,6 +1021,7 @@ class FracLineDockWidget(QgsDockWidget):
                     self.selct_scanline_combo.clear()
                     self.selct_scanline_combo.addItems(self.scanline_ids)
                     self.run_stats_button.setEnabled(True)
+                    self.show_labels_checkbox.setEnabled(True)
             else:
                 self.log_browser.append(
                     "No fractures layer selected. Skipping intersection and splitting."
@@ -1028,6 +1035,7 @@ class FracLineDockWidget(QgsDockWidget):
             self.plot_widget = FracLinePlotWidget(self.iface)
             self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
         self.plot_widget.show()
+        self.plot_widget.tab_widget.setCurrentIndex(0)
 
         barcode_ar = 1 / self.barcode_ar_spinbox.value()
         barcode_color = self.barcode_color_combo.currentText()
@@ -1141,6 +1149,7 @@ class FracLineDockWidget(QgsDockWidget):
 
         fig1.tight_layout()
         self.plot_widget.canvas1.draw()
+        
         self.log_browser.append("Scanline analysis plot generated.")
 
     def run_stats_for_scanline(self):
@@ -1148,6 +1157,7 @@ class FracLineDockWidget(QgsDockWidget):
             self.plot_widget = FracLinePlotWidget(self.iface)
             self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
         self.plot_widget.show()
+        self.plot_widget.tab_widget.setCurrentIndex(1)
 
         this_scanline_id = self.selct_scanline_combo.currentText()
         if not this_scanline_id:
@@ -1170,6 +1180,9 @@ class FracLineDockWidget(QgsDockWidget):
                 spacings.append(feature["spacing"])
                 distances_order.append(feature["distance_order"])
                 spacings_order.append(feature["spacing_order"])
+        data = np.column_stack([distances_order, distances, spacings_order, spacings])
+        data = data[data[:,0].argsort()]
+        distances_order, distances, spacings_order, spacings = data[:,0], data[:,1], data[:,2], data[:,3]
 
         # Calculate descriptive stats
         spacings_n = len(spacings)
@@ -1191,7 +1204,15 @@ class FracLineDockWidget(QgsDockWidget):
         else:
             trend_Ho = True  # no strong evidence against Ho -> Ho retained -> no trend detected
 
-
+        # Speraman correlation coeff and p-value for pattern.
+        # Test outcome as follows:
+        # Ho = no correlation, or no PATTERN - p-value >= 5%
+        # Ha = positive or negative correlation, or PATTERN - p-value < 5%
+        pattern_R, pattern_Pval = stats.spearmanr(spacings[:-1],spacings[1:])
+        if pattern_Pval < 0.05:
+            pattern_Ho = False # strong evidence against Ho -> Ho rejected -> pattern detected
+        else:
+            pattern_Ho = True  # no strong evidence against Ho -> Ho retained -> no pattern detected
 
         # Figure 2 - statistics
         fig2 = self.plot_widget.figure2
@@ -1201,25 +1222,52 @@ class FracLineDockWidget(QgsDockWidget):
         ax11, ax12, ax13, ax21, ax22, ax23 = axes.flatten()
 
         ax11.plot(distances, spacings, marker="o", markersize=4, linestyle="", color="blue")
+        ax11.grid(True)
+        ax11.tick_params(axis='x', rotation=45)
         ax11.set_xlabel("Distance [m]")
         ax11.set_ylabel("Spacing [m]")
+        if self.show_labels_checkbox.isChecked():
+            for x, y, di, si in zip(distances, spacings, distances_order, spacings_order):
+                ax11.text(x, y, f"d{di:.0f}-s{si:.0f}", fontsize=8, ha="left", va="center")
 
         ax21.plot(distances_order, spacings_order, marker="o", markersize=4, linestyle="", color="blue")
+        ax21.grid(True)
+        ax21.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax21.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax21.set_xlabel("Distance [order]")
         ax21.set_ylabel("Spacing [order]")
+        if self.show_labels_checkbox.isChecked():
+            for x, y, di, si in zip(distances_order, spacings_order, distances_order, spacings_order):
+                ax21.text(x, y, f"d{di:.0f}-s{si:.0f}", fontsize=8, ha="left", va="center")
 
         ax12.plot(spacings[:-1], spacings[1:], marker="o", markersize=4, linestyle="", color="blue")
+        ax12.grid(True)
+        ax12.tick_params(axis='x', rotation=45)
         ax12.set_xlabel("Spacing @ i [m]")
         ax12.set_ylabel("Spacing @ i+1 [m]")
+        if self.show_labels_checkbox.isChecked():
+            for x, y, di, dii in zip(spacings[:-1], spacings[1:], distances_order[:-1], distances_order[1:]):
+                ax12.text(x, y, f"d{di:.0f}-d{dii:.0f}", fontsize=8, ha="left", va="center")
 
         ax22.plot(spacings_order[:-1], spacings_order[1:], marker="o", markersize=4, linestyle="", color="blue")
+        ax22.grid(True)
+        ax21.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax21.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
         ax22.set_xlabel("Spacing @ i [order]")
         ax22.set_ylabel("Spacing @ i+1 [order]")
+        if self.show_labels_checkbox.isChecked():
+            for x, y, di, dii in zip(spacings_order[:-1], spacings_order[1:], distances_order[:-1], distances_order[1:]):
+                ax22.text(x, y, f"d{di:.0f}-d{dii:.0f}", fontsize=8, ha="left", va="center")
 
         fig2.tight_layout()
         self.plot_widget.canvas2.draw()
+
         self.log_browser.append("___________________________________________________")
         self.log_browser.append(f"Scanline {this_scanline_id} stats completed with {spacings_n} spacing data.")
+        self.log_browser.append(f"distances: {distances}")
+        self.log_browser.append(f"spacings: {spacings}")
+        self.log_browser.append(f"distances_order: {distances_order}")
+        self.log_browser.append(f"spacings_order: {spacings_order}")
         self.log_browser.append(f"mean spacing {spacings_mean}")
         self.log_browser.append(f"std dev spacing {spacings_std}")
         self.log_browser.append(f"min spacing {spacings_min}")
@@ -1233,3 +1281,9 @@ class FracLineDockWidget(QgsDockWidget):
             self.log_browser.append(f"Result: No significant trend detected (fail to reject Ho).")
         else:
             self.log_browser.append(f"Result: Significant trend detected (reject Ho).")
+        self.log_browser.append(f"Spearman rank correlation coefficient for PATTERN:")
+        self.log_browser.append(f"R = {pattern_R}, p-value = {pattern_Pval}.")
+        if pattern_Ho:
+            self.log_browser.append(f"Result: No significant pattern detected (fail to reject Ho).")
+        else:
+            self.log_browser.append(f"Result: Significant pattern detected (reject Ho).")
