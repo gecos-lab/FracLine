@@ -57,6 +57,8 @@ from collections import defaultdict, Counter
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
+import scipy.stats as stats
+
 
 def check_layer(
     layer,
@@ -365,19 +367,30 @@ class FracLineDockWidget(QgsDockWidget):
 
     def update_scanline_id_field_combo(self, layer):
         self.scanline_id_field_combo.setLayer(layer)
-        if layer:
-            # Try to pre-select 'scanline_id' or 'ID' or 'id'
-            field_name_to_find = "scanline_id"
-            idx = layer.fields().indexOf(field_name_to_find)
-            if idx == -1:
-                field_name_to_find = "ID"
-                idx = layer.fields().indexOf(field_name_to_find)
-            if idx == -1:
-                field_name_to_find = "id"
-                idx = layer.fields().indexOf(field_name_to_find)
+        if not layer:
+            return
 
-            if idx != -1:
-                self.scanline_id_field_combo.setCurrentIndex(idx)
+        # The filter for String fields is already set in __init__
+        # Check if any string fields were found
+        if self.scanline_id_field_combo.count() == 0:
+            self.log_browser.append("ERROR: Scanlines layer must have at least one text field to be used as an ID.")
+            return
+
+        # Find the best default field.
+        # The combo box is already filtered to show only string fields.
+        fields = [self.scanline_id_field_combo.itemText(i) for i in range(self.scanline_id_field_combo.count())]
+
+        preferred_field = None
+        if "ID" in fields:
+            preferred_field = "ID"
+        elif "id" in fields:
+            preferred_field = "id"
+
+        if preferred_field:
+            self.scanline_id_field_combo.setField(preferred_field)
+        else:
+            # Default to the first item in the list if no preferred field is found.
+            self.scanline_id_field_combo.setCurrentIndex(0)
 
     def find_and_set_layers(self):
         """Finds layers with specific names and sets them in the combo boxes."""
@@ -1158,6 +1171,28 @@ class FracLineDockWidget(QgsDockWidget):
                 distances_order.append(feature["distance_order"])
                 spacings_order.append(feature["spacing_order"])
 
+        # Calculate descriptive stats
+        spacings_n = len(spacings)
+        spacings_mean = np.mean(spacings)
+        spacings_std = np.std(spacings)
+        spacings_min = min(spacings)
+        spacings_max = max(spacings)
+        spacings_skew = stats.skew(spacings)
+        spacings_kurt = stats.kurtosis(spacings)
+        spacings_P10 = 1/spacings_mean
+
+        # Speraman correlation coeff and p-value for trend.
+        # Test outcome as follows:
+        # Ho = no correlation, or no TREND - p-value >= 5%
+        # Ha = positive or negative correlation, or TREND - p-value < 5%
+        trend_R, trend_Pval = stats.spearmanr(distances,spacings)
+        if trend_Pval < 0.05:
+            trend_Ho = False # strong evidence against Ho -> Ho rejected -> trend detected
+        else:
+            trend_Ho = True  # no strong evidence against Ho -> Ho retained -> no trend detected
+
+
+
         # Figure 2 - statistics
         fig2 = self.plot_widget.figure2
         fig2.clear()
@@ -1173,14 +1208,28 @@ class FracLineDockWidget(QgsDockWidget):
         ax21.set_xlabel("Distance [order]")
         ax21.set_ylabel("Spacing [order]")
 
-        ax12.plot(spacings[0:-2], spacings[1:-1], marker="o", markersize=4, linestyle="", color="blue")
+        ax12.plot(spacings[:-1], spacings[1:], marker="o", markersize=4, linestyle="", color="blue")
         ax12.set_xlabel("Spacing @ i [m]")
         ax12.set_ylabel("Spacing @ i+1 [m]")
 
-        ax22.plot(spacings_order[0:-2], spacings_order[1:-1], marker="o", markersize=4, linestyle="", color="blue")
+        ax22.plot(spacings_order[:-1], spacings_order[1:], marker="o", markersize=4, linestyle="", color="blue")
         ax22.set_xlabel("Spacing @ i [order]")
         ax22.set_ylabel("Spacing @ i+1 [order]")
 
         fig2.tight_layout()
-        self.plot_widget.canvas1.draw()
-        self.log_browser.append(f"Scanline {this_scanline_id} stats completed.")
+        self.plot_widget.canvas2.draw()
+        self.log_browser.append("___________________________________________________")
+        self.log_browser.append(f"Scanline {this_scanline_id} stats completed with {spacings_n} spacing data.")
+        self.log_browser.append(f"mean spacing {spacings_mean}")
+        self.log_browser.append(f"std dev spacing {spacings_std}")
+        self.log_browser.append(f"min spacing {spacings_min}")
+        self.log_browser.append(f"max spacing {spacings_max}")
+        self.log_browser.append(f"skewness spacing {spacings_skew}")
+        self.log_browser.append(f"kurtosis spacing {spacings_kurt}")
+        self.log_browser.append(f"P10 spacing {spacings_P10}")
+        self.log_browser.append(f"Spearman rank correlation coefficient for TREND:")
+        self.log_browser.append(f"R = {trend_R}, p-value = {trend_Pval}.")
+        if trend_Ho:
+            self.log_browser.append(f"Result: No significant trend detected (fail to reject Ho).")
+        else:
+            self.log_browser.append(f"Result: Significant trend detected (reject Ho).")
