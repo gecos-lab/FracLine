@@ -60,6 +60,22 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 import scipy.stats as stats
 
+def empirical_cdf(data, method='linear'):
+    """empirical_cdf of data"""
+    sorted_data = np.sort(data)
+    if method == 'linear':
+        cumulative_probability = np.linspace(0, 1, len(data))
+    elif method == 'step':
+        cumulative_probability = np.arange(0, len(data)) / (len(data) - 1)
+    return cumulative_probability, sorted_data
+
+def uniform_cdf(data, method='linear'):
+    sorted_data = np.linspace(np.min(data), np.max(data), len(data))
+    if method == 'linear':
+        cumulative_probability = np.linspace(0, 1, len(data))
+    elif method == 'step':
+        cumulative_probability = np.arange(0, len(data)) / (len(data) - 1)
+    return cumulative_probability, sorted_data
 
 def check_layer(
     layer,
@@ -1159,21 +1175,20 @@ class FracLineDockWidget(QgsDockWidget):
         self.plot_widget.show()
         self.plot_widget.tab_widget.setCurrentIndex(1)
 
+        # set scanline id and filter
         this_scanline_id = self.selct_scanline_combo.currentText()
         if not this_scanline_id:
             self.log_browser.append("ERROR: Scanline ID must be selected.")
             return
+        request = QgsFeatureRequest().setFilterExpression(
+            f'"scanline_id" = \'{this_scanline_id}\''
+        )
 
-        # get data for scanline
+        # Data from scanlines_clip_split
         distances = []
         spacings = []
         distances_order = []
         spacings_order = []
-
-        # Data from scanlines_clip_split
-        request = QgsFeatureRequest().setFilterExpression(
-            f'"scanline_id" = \'{this_scanline_id}\''
-        )
         if self.scanlines_clip_split:
             for feature in self.scanlines_clip_split.getFeatures(request):
                 distances.append(feature["distance"])
@@ -1213,6 +1228,17 @@ class FracLineDockWidget(QgsDockWidget):
             pattern_Ho = False # strong evidence against Ho -> Ho rejected -> pattern detected
         else:
             pattern_Ho = True  # no strong evidence against Ho -> Ho retained -> no pattern detected
+
+        # Data from the intersections layer
+        temp_list = []
+        if self.intersections_layer:
+            for feature in self.intersections_layer.getFeatures(request):
+                temp_list.append(feature["distance"])
+        intersection_distances = np.sort(np.array(temp_list))
+
+        # CSF - Cumulative Spacing Function
+        data_cumulative_probability, sorted_data = empirical_cdf(intersection_distances)
+        uniform_cumulative_probability, sorted_uniform = uniform_cdf(intersection_distances)
 
         # Figure 2 - statistics
         fig2 = self.plot_widget.figure2
@@ -1258,6 +1284,13 @@ class FracLineDockWidget(QgsDockWidget):
         if self.show_labels_checkbox.isChecked():
             for x, y, di, dii in zip(spacings_order[:-1], spacings_order[1:], distances_order[:-1], distances_order[1:]):
                 ax22.text(x, y, f"d{di:.0f}-d{dii:.0f}", fontsize=8, ha="left", va="center")
+
+        ax13.plot(sorted_uniform, uniform_cumulative_probability, linestyle="-", color="red")
+        ax13.plot(sorted_data, data_cumulative_probability, linestyle="-", color="blue")
+        ax13.grid(True)
+        ax13.tick_params(axis='x', rotation=45)
+        ax13.set_xlabel("Distance [m]")
+        ax13.set_ylabel("Cumulative probability")
 
         fig2.tight_layout()
         self.plot_widget.canvas2.draw()
