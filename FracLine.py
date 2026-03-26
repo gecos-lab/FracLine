@@ -327,6 +327,9 @@ class FracLineDockWidget(QgsDockWidget):
         self.run_stats_button = QPushButton("Run statistics for selected scanline")
         self.run_stats_button.setEnabled(False)
 
+        self.save_button = QPushButton("Save analysis to project")
+        self.save_button.setEnabled(False)
+
         # Set layer filters
         self.fractures_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
         self.scanlines_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
@@ -377,6 +380,7 @@ class FracLineDockWidget(QgsDockWidget):
         layout.addLayout(select_scan_layout)
 
         layout.addWidget(self.run_stats_button)
+        layout.addWidget(self.save_button)
 
         layout.addWidget(self.log_browser)
 
@@ -393,13 +397,21 @@ class FracLineDockWidget(QgsDockWidget):
         self.measure_button.clicked.connect(self.run_analysis)
         self.plot_barcodes_button.clicked.connect(self.plot_barcodes)
         self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
+        self.save_button.clicked.connect(self.save_analysis)
         self.selct_scanline_combo.currentIndexChanged.connect(self.update_distance_spins)
+        self.selct_scanline_combo.currentIndexChanged.connect(self._deactivate_save_button)
         self.min_distance_spin.valueChanged.connect(self.update_max_distance_spin_min)
+        self.min_distance_spin.valueChanged.connect(self._deactivate_save_button)
         self.max_distance_spin.valueChanged.connect(self.update_min_distance_spin_max)
+        self.max_distance_spin.valueChanged.connect(self._deactivate_save_button)
+        self.scanline_id_field_combo.currentIndexChanged.connect(self.validate_layers)
 
         self.find_and_set_layers()
         self.validate_layers()
         self.update_scanline_list()
+
+    def _deactivate_save_button(self):
+        self.save_button.setEnabled(False)
 
     def update_distance_spins(self):
         scanline_id = self.selct_scanline_combo.currentText()
@@ -492,6 +504,7 @@ class FracLineDockWidget(QgsDockWidget):
                     self.update_scanline_id_field_combo(layer)
 
     def validate_layers(self):
+        self._deactivate_analysis_buttons()
         self.log_browser.clear()
         try:
             project_crs = QgsProject.instance().crs()
@@ -561,6 +574,15 @@ class FracLineDockWidget(QgsDockWidget):
 
         except Exception as e:
             self.log_browser.append(f"ERROR: {e}")
+
+    def _deactivate_analysis_buttons(self):
+        self.plot_barcodes_button.setEnabled(False)
+        self.run_stats_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.selct_scanline_combo.setEnabled(False)
+        self.min_distance_spin.setEnabled(False)
+        self.max_distance_spin.setEnabled(False)
+        self.show_labels_checkbox.setEnabled(False)
 
     def _get_or_create_output_group(self):
         """Finds or creates a static group for output layers."""
@@ -1239,12 +1261,12 @@ class FracLineDockWidget(QgsDockWidget):
         self.plot_widget.tab_widget.setCurrentIndex(1)
 
         # set scanline id and filter
-        this_scanline_id = self.selct_scanline_combo.currentText()
-        if not this_scanline_id:
+        self.this_scanline_id = self.selct_scanline_combo.currentText()
+        if not self.this_scanline_id:
             self.log_browser.append("ERROR: Scanline ID must be selected.")
             return
         request = QgsFeatureRequest().setFilterExpression(
-            f"\"scanline_id\" = '{this_scanline_id}'"
+            f"\"scanline_id\" = '{self.this_scanline_id}'"
         )
 
         # Data from scanlines_clip_split
@@ -1262,11 +1284,11 @@ class FracLineDockWidget(QgsDockWidget):
         data = data[data[:, 0].argsort()]
 
         # Filter for distance range
-        min_distance = self.min_distance_spin.value()
-        max_distance = self.max_distance_spin.value()
+        self.min_distance = self.min_distance_spin.value()
+        self.max_distance = self.max_distance_spin.value()
         
         # Apply filtering and write arrays
-        filtered_indices = (data[:, 1] >= min_distance) & (data[:, 1] <= max_distance)
+        filtered_indices = (data[:, 1] >= self.min_distance) & (data[:, 1] <= self.max_distance)
         data_filtered = data[filtered_indices]
         distances_order, distances, spacings_order, spacings = (
             data_filtered[:, 0],
@@ -1276,38 +1298,38 @@ class FracLineDockWidget(QgsDockWidget):
         )
 
         # Calculate descriptive stats
-        spacings_n = len(spacings)
-        spacings_mean = np.mean(spacings)
-        spacings_std = np.std(spacings)
-        spacings_min = min(spacings)
-        spacings_max = max(spacings)
-        spacings_skew = stats.skew(spacings)
-        spacings_kurt = stats.kurtosis(spacings)
-        spacings_P10 = 1 / spacings_mean
+        self.spacings_n = len(spacings)
+        self.spacings_mean = np.mean(spacings)
+        self.spacings_std = np.std(spacings)
+        self.spacings_min = min(spacings)
+        self.spacings_max = max(spacings)
+        self.spacings_skew = stats.skew(spacings)
+        self.spacings_kurt = stats.kurtosis(spacings)
+        self.spacings_P10 = 1 / self.spacings_mean
 
         # Speraman correlation coeff and p-value for trend.
         # Test outcome as follows:
         # Ho = no correlation, or no TREND - p-value >= 5%
         # Ha = positive or negative correlation, or TREND - p-value < 5%
-        trend_R, trend_Pval = stats.spearmanr(distances, spacings)
-        if trend_Pval < 0.05:
-            trend_Ho = (
+        trend_R, self.trend_Pval = stats.spearmanr(distances, spacings)
+        if self.trend_Pval < 0.05:
+            self.trend_Ho = (
                 False  # strong evidence against Ho -> Ho rejected -> trend detected
             )
         else:
-            trend_Ho = True  # no strong evidence against Ho -> Ho retained -> no trend detected
+            self.trend_Ho = True  # no strong evidence against Ho -> Ho retained -> no trend detected
 
         # Speraman correlation coeff and p-value for pattern.
         # Test outcome as follows:
         # Ho = no correlation, or no PATTERN - p-value >= 5%
         # Ha = positive or negative correlation, or PATTERN - p-value < 5%
-        pattern_R, pattern_Pval = stats.spearmanr(spacings[:-1], spacings[1:])
-        if pattern_Pval < 0.05:
-            pattern_Ho = (
+        pattern_R, self.pattern_Pval = stats.spearmanr(spacings[:-1], spacings[1:])
+        if self.pattern_Pval < 0.05:
+            self.pattern_Ho = (
                 False  # strong evidence against Ho -> Ho rejected -> pattern detected
             )
         else:
-            pattern_Ho = True  # no strong evidence against Ho -> Ho retained -> no pattern detected
+            self.pattern_Ho = True  # no strong evidence against Ho -> Ho retained -> no pattern detected
 
         # Data from the intersections layer
         temp_list = []
@@ -1317,7 +1339,7 @@ class FracLineDockWidget(QgsDockWidget):
         intersection_distances = np.sort(np.array(temp_list))
 
         # Apply filtering and write arrays
-        filtered_indices = (intersection_distances >= min_distance) & (intersection_distances <= max_distance)
+        filtered_indices = (intersection_distances >= self.min_distance) & (intersection_distances <= self.max_distance)
         intersection_distances = intersection_distances[filtered_indices]
 
         # CSF - Cumulative Spacing Function
@@ -1457,30 +1479,30 @@ class FracLineDockWidget(QgsDockWidget):
 
         self.log_browser.append("___________________________________________________")
         self.log_browser.append(
-            f"Scanline {this_scanline_id} stats completed with {spacings_n} spacing data."
+            f"Scanline {self.this_scanline_id} stats completed with {self.spacings_n} spacing data."
         )
         self.log_browser.append(f"distances: {distances}")
         self.log_browser.append(f"spacings: {spacings}")
         self.log_browser.append(f"distances_order: {distances_order}")
         self.log_browser.append(f"spacings_order: {spacings_order}")
-        self.log_browser.append(f"mean spacing {spacings_mean}")
-        self.log_browser.append(f"std dev spacing {spacings_std}")
-        self.log_browser.append(f"min spacing {spacings_min}")
-        self.log_browser.append(f"max spacing {spacings_max}")
-        self.log_browser.append(f"skewness spacing {spacings_skew}")
-        self.log_browser.append(f"kurtosis spacing {spacings_kurt}")
-        self.log_browser.append(f"P10 spacing {spacings_P10}")
+        self.log_browser.append(f"mean spacing {self.spacings_mean}")
+        self.log_browser.append(f"std dev spacing {self.spacings_std}")
+        self.log_browser.append(f"min spacing {self.spacings_min}")
+        self.log_browser.append(f"max spacing {self.spacings_max}")
+        self.log_browser.append(f"skewness spacing {self.spacings_skew}")
+        self.log_browser.append(f"kurtosis spacing {self.spacings_kurt}")
+        self.log_browser.append(f"P10 spacing {self.spacings_P10}")
         self.log_browser.append(f"Spearman rank correlation coefficient for TREND:")
-        self.log_browser.append(f"R = {trend_R}, p-value = {trend_Pval}.")
-        if trend_Ho:
+        self.log_browser.append(f"R = {trend_R}, p-value = {self.trend_Pval}.")
+        if self.trend_Ho:
             self.log_browser.append(
                 f"Result: No significant trend detected (fail to reject Ho)."
             )
         else:
             self.log_browser.append(f"Result: Significant trend detected (reject Ho).")
         self.log_browser.append(f"Spearman rank correlation coefficient for PATTERN:")
-        self.log_browser.append(f"R = {pattern_R}, p-value = {pattern_Pval}.")
-        if pattern_Ho:
+        self.log_browser.append(f"R = {pattern_R}, p-value = {self.pattern_Pval}.")
+        if self.pattern_Ho:
             self.log_browser.append(
                 f"Result: No significant pattern detected (fail to reject Ho)."
             )
@@ -1488,3 +1510,120 @@ class FracLineDockWidget(QgsDockWidget):
             self.log_browser.append(
                 f"Result: Significant pattern detected (reject Ho)."
             )
+        self.save_button.setEnabled(True)
+
+    def save_analysis(self):
+        if not hasattr(self, "this_scanline_id"):
+            self.log_browser.append("ERROR: No analysis to save. Run stats for a scanline first.")
+            return
+
+        layer_name = f"scanline_{self.this_scanline_id}_{self.min_distance}_{self.max_distance}"
+        if not self._check_and_remove_existing_temp_layer(layer_name):
+            return
+
+        project_crs = QgsProject.instance().crs()
+        temp_layer = QgsVectorLayer(
+            f"LineString?crs={project_crs.toWkt()}", layer_name, "memory"
+        )
+        provider = temp_layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("scanline_id", QVariant.String),
+                QgsField("min_dist", QVariant.Double),
+                QgsField("max_dist", QVariant.Double),
+                QgsField("spacings_n", QVariant.Int),
+                QgsField("spacings_min", QVariant.Double),
+                QgsField("spacings_max", QVariant.Double),
+                QgsField("spacings_mean", QVariant.Double),
+                QgsField("spacings_std", QVariant.Double),
+                QgsField("spacings_skew", QVariant.Double),
+                QgsField("spacings_kurt", QVariant.Double),
+                QgsField("P10", QVariant.Double),
+                QgsField("trend_Pval", QVariant.Double),
+                QgsField("trend_Ho", QVariant.Bool),
+                QgsField("pattern_Pval", QVariant.Double),
+                QgsField("pattern_Ho", QVariant.Bool),
+            ]
+        )
+        temp_layer.updateFields()
+
+        # Find the geometry of the scanline within the distance range
+        # We select the scanline from scanlines_clip and cut it at min_distance and max_distance
+        request = QgsFeatureRequest().setFilterExpression(
+            f"\"scanline_id\" = '{self.this_scanline_id}'"
+        )
+        
+        combined_geom = QgsGeometry()
+        if self.scanlines_clip:
+            for feature in self.scanlines_clip.getFeatures(request):
+                geom = feature.geometry()
+                d_start = feature["start"]
+                d_end = feature["end"]
+                
+                # Check for overlap between [min(d_start, d_end), max(d_start, d_end)]
+                # and [self.min_distance, self.max_distance]
+                p_min = min(d_start, d_end)
+                p_max = max(d_start, d_end)
+                
+                overlap_min = max(p_min, self.min_distance)
+                overlap_max = min(p_max, self.max_distance)
+                
+                if overlap_min < overlap_max:
+                    # There is an overlap, find fractional positions
+                    # f1 corresponds to overlap_min, f2 to overlap_max
+                    f_min = (overlap_min - d_start) / (d_end - d_start)
+                    f_max = (overlap_max - d_start) / (d_end - d_start)
+                    
+                    length = geom.length()
+                    
+                    # Workaround for QgsGeometry missing curveSubstring/lineSubstring in some QGIS versions
+                    # We use the underlying QgsCurve if available
+                    curve = geom.constGet()
+                    if hasattr(curve, 'curveSubstring'):
+                        sub_curve = curve.curveSubstring(min(f_min, f_max) * length, max(f_min, f_max) * length)
+                        sub_geom = QgsGeometry(sub_curve)
+                    else:
+                        # Fallback to a simpler approach if curveSubstring is not available on the curve either
+                        # Since we can't easily implement a robust substring, we'll try to use the geometry directly if it's very close
+                        # but this is a last resort. Usually, curveSubstring should be on the curve.
+                        # For now, let's try to cast it to a linestring if it's not.
+                        sub_geom = geom.curveSubstring(min(f_min, f_max) * length, max(f_min, f_max) * length)
+                    
+                    if combined_geom.isNull():
+                        combined_geom = sub_geom
+                    else:
+                        combined_geom = combined_geom.combine(sub_geom)
+
+        if combined_geom.isNull():
+            self.log_browser.append(f"WARNING: No geometry found for {layer_name}")
+            return
+
+        new_feature = QgsFeature(temp_layer.fields())
+        new_feature.setGeometry(combined_geom)
+        new_feature.setAttributes(
+            [
+                self.this_scanline_id,
+                self.min_distance,
+                self.max_distance,
+                self.spacings_n,
+                self.spacings_min,
+                self.spacings_max,
+                self.spacings_mean,
+                self.spacings_std,
+                self.spacings_skew,
+                self.spacings_kurt,
+                self.spacings_P10,
+                self.trend_Pval,
+                self.trend_Ho,
+                self.pattern_Pval,
+                self.pattern_Ho,
+            ]
+        )
+        provider.addFeatures([new_feature])
+        temp_layer.updateExtents()
+
+        output_group = self._get_or_create_output_group()
+        QgsProject.instance().addMapLayer(temp_layer, False)
+        output_group.addLayer(temp_layer)
+
+        self.log_browser.append(f"Temporary layer '{layer_name}' created and added to canvas.")
