@@ -393,10 +393,46 @@ class FracLineDockWidget(QgsDockWidget):
         self.measure_button.clicked.connect(self.run_analysis)
         self.plot_barcodes_button.clicked.connect(self.plot_barcodes)
         self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
+        self.selct_scanline_combo.currentIndexChanged.connect(self.update_distance_spins)
+        self.min_distance_spin.valueChanged.connect(self.update_max_distance_spin_min)
+        self.max_distance_spin.valueChanged.connect(self.update_min_distance_spin_max)
 
         self.find_and_set_layers()
         self.validate_layers()
         self.update_scanline_list()
+
+    def update_distance_spins(self):
+        scanline_id = self.selct_scanline_combo.currentText()
+        if not scanline_id or not self.scanlines_clip:
+            return
+
+        min_dist = float('inf')
+        max_dist = float('-inf')
+
+        request = QgsFeatureRequest().setFilterExpression(f"\"scanline_id\" = '{scanline_id}'")
+        for feature in self.scanlines_clip.getFeatures(request):
+            min_dist = min(min_dist, feature["start"], feature["end"])
+            max_dist = max(max_dist, feature["start"], feature["end"])
+
+        if min_dist == float('inf') or max_dist == float('-inf'):
+            return
+
+        dist_range = max_dist - min_dist
+        single_step = dist_range / 1000
+
+        self.min_distance_spin.setRange(min_dist, max_dist)
+        self.min_distance_spin.setSingleStep(single_step)
+        self.min_distance_spin.setValue(min_dist)
+
+        self.max_distance_spin.setRange(min_dist, max_dist)
+        self.max_distance_spin.setSingleStep(single_step)
+        self.max_distance_spin.setValue(max_dist)
+
+    def update_max_distance_spin_min(self, value):
+        self.max_distance_spin.setMinimum(value)
+
+    def update_min_distance_spin_max(self, value):
+        self.min_distance_spin.setMaximum(value)
 
     def update_scanline_list(self):
         # Get unique scanline_ids from the layer
