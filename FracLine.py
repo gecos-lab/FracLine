@@ -14,10 +14,8 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
-import geopandas
-import numpy as np
+
 import qgis.processing
-from shapely.wkt import loads
 from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import (
     QAction,
@@ -56,14 +54,20 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox, QgsDockWidget, QgsFieldComboBox
 from collections import defaultdict, Counter
 
-import matplotlib.pyplot as plt
+import numpy as np
+
+from matplotlib.pyplot import subplots, MaxNLocator
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 import scipy.stats as stats
 
 
 def empirical_cdf(data, method="linear"):
-    """empirical_cdf of data"""
+    """
+    Calculates the Empirical CDF of data.
+    Method "linear" (default) returns a smooth function.
+    Method "step" returns a stepwise function.
+    """
     sorted_data = np.sort(data)
     if method == "linear":
         cumulative_probability = np.linspace(0, 1, len(data))
@@ -73,6 +77,11 @@ def empirical_cdf(data, method="linear"):
 
 
 def uniform_cdf(data, method="linear"):
+    """
+    Calculates a uniform CDF on the same interval of data, and outputs the same number of points.
+    Method "linear" (default) returns a smooth function.
+    Method "step" returns a stepwise function.
+    """
     sorted_data = np.linspace(np.min(data), np.max(data), len(data))
     if method == "linear":
         cumulative_probability = np.linspace(0, 1, len(data))
@@ -93,7 +102,7 @@ def check_layer(
     Validates the input layer.
     For lines: checks that they are not "disconnected" multipart geometries.
     For polygons: no geometry validation is performed.
-    Also checks for ID field and other constraints.
+    Also checks for ID field and other requirements.
     """
     if not layer:
         raise QgsProcessingException(f"Layer not found: {name}")
@@ -149,6 +158,10 @@ def check_layer(
 
 
 class FracLinePlugin:
+    """
+    Main class used to generate the plugin.
+    """
+
     def __init__(self, iface):
         self.iface = iface
         self.dockwidget = None
@@ -177,6 +190,10 @@ class FracLinePlugin:
 
 
 class FracLinePlotWidget(QgsDockWidget):
+    """
+    Class used to generate the tabbed panel that contains plotting canvases.
+    """
+
     def __init__(self, iface):
         super().__init__("FracLine Plots")
         self.iface = iface
@@ -190,11 +207,15 @@ class FracLinePlotWidget(QgsDockWidget):
         self.setWidget(main_widget)
 
         # Create two figures and canvases
-        self.figure1, self.ax1 = plt.subplots()
+        self.figure1, self.ax1 = subplots()
         self.canvas1 = FigureCanvas(self.figure1)
+        self.figure1.tight_layout()
+        self.figure1.clear()
 
-        self.figure2, self.ax2 = plt.subplots()
+        self.figure2, self.ax2 = subplots()
         self.canvas2 = FigureCanvas(self.figure2)
+        self.figure2.tight_layout()
+        self.figure2.clear()
 
         # Add canvases to the layout
         self.tab_widget.addTab(self.canvas1, "Barcode plots")
@@ -202,6 +223,10 @@ class FracLinePlotWidget(QgsDockWidget):
 
 
 class FracLineDockWidget(QgsDockWidget):
+    """
+    Class used to manage all the data import/export, plotting, analysis, etc.
+    """
+
     def __init__(self, iface):
         super().__init__("FracLine")
         self.iface = iface
@@ -240,7 +265,6 @@ class FracLineDockWidget(QgsDockWidget):
         self.interpretation_boundary_combo.setAllowEmptyLayer(True)
         self.interpretation_boundary_combo.setCurrentIndex(0)
 
-        self.log_browser = QTextBrowser(self)
         self.measure_button = QPushButton("Measure spacing and distance")
 
         self.barcode_ar_spinbox = QSpinBox()
@@ -327,8 +351,10 @@ class FracLineDockWidget(QgsDockWidget):
         self.run_stats_button = QPushButton("Run statistics for selected scanline")
         self.run_stats_button.setEnabled(False)
 
-        self.save_button = QPushButton("Save analysis to project")
+        self.save_button = QPushButton("Save selected scanline to layer")
         self.save_button.setEnabled(False)
+
+        self.log_browser = QTextBrowser(self)
 
         # Set layer filters
         self.fractures_combo.setFilters(QgsMapLayerProxyModel.LineLayer)
@@ -394,18 +420,23 @@ class FracLineDockWidget(QgsDockWidget):
         self.scanlines_combo.layerChanged.connect(self.update_scanline_id_field_combo)
         self.reference_line_combo.layerChanged.connect(self.validate_layers)
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
-        self.measure_button.clicked.connect(self.run_analysis)
+        self.measure_button.clicked.connect(self.run_measuring)
         self.plot_barcodes_button.clicked.connect(self.plot_barcodes)
-        self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
-        self.save_button.clicked.connect(self.save_analysis)
-        self.selct_scanline_combo.currentIndexChanged.connect(self.update_distance_spins)
-        self.selct_scanline_combo.currentIndexChanged.connect(self._deactivate_save_button)
+        self.scanline_id_field_combo.currentIndexChanged.connect(self.validate_layers)
+        self.selct_scanline_combo.currentIndexChanged.connect(
+            self.update_distance_spins
+        )
+        self.selct_scanline_combo.currentIndexChanged.connect(
+            self._deactivate_save_button
+        )
         self.min_distance_spin.valueChanged.connect(self.update_max_distance_spin_min)
         self.min_distance_spin.valueChanged.connect(self._deactivate_save_button)
         self.max_distance_spin.valueChanged.connect(self.update_min_distance_spin_max)
         self.max_distance_spin.valueChanged.connect(self._deactivate_save_button)
-        self.scanline_id_field_combo.currentIndexChanged.connect(self.validate_layers)
+        self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
+        self.save_button.clicked.connect(self.save_analysis)
 
+        # Initialize layers and plugin
         self.find_and_set_layers()
         self.validate_layers()
         self.update_scanline_list()
@@ -413,20 +444,32 @@ class FracLineDockWidget(QgsDockWidget):
     def _deactivate_save_button(self):
         self.save_button.setEnabled(False)
 
+    def _deactivate_analysis_buttons(self):
+        self.plot_barcodes_button.setEnabled(False)
+        self.run_stats_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.selct_scanline_combo.setEnabled(False)
+        self.min_distance_spin.setEnabled(False)
+        self.max_distance_spin.setEnabled(False)
+        self.show_labels_checkbox.setEnabled(False)
+
     def update_distance_spins(self):
         scanline_id = self.selct_scanline_combo.currentText()
         if not scanline_id or not self.scanlines_clip:
             return
 
-        min_dist = float('inf')
-        max_dist = float('-inf')
+        min_dist = float("inf")
+        max_dist = float("-inf")
 
-        request = QgsFeatureRequest().setFilterExpression(f"\"scanline_id\" = '{scanline_id}'")
+        request = QgsFeatureRequest().setFilterExpression(
+            f"\"scanline_id\" = '{scanline_id}'"
+        )
+
         for feature in self.scanlines_clip.getFeatures(request):
             min_dist = min(min_dist, feature["start"], feature["end"])
             max_dist = max(max_dist, feature["start"], feature["end"])
 
-        if min_dist == float('inf') or max_dist == float('-inf'):
+        if min_dist == float("inf") or max_dist == float("-inf"):
             return
 
         dist_range = max_dist - min_dist
@@ -488,7 +531,9 @@ class FracLineDockWidget(QgsDockWidget):
             self.scanline_id_field_combo.setCurrentIndex(0)
 
     def find_and_set_layers(self):
-        """Finds layers with specific names and sets them in the combo boxes."""
+        """
+        Finds layers with specific names, if they do exist, and sets them in the combo boxes.
+        """
         layer_map = {
             "fractures": self.fractures_combo,
             "scanlines": self.scanlines_combo,
@@ -575,29 +620,6 @@ class FracLineDockWidget(QgsDockWidget):
         except Exception as e:
             self.log_browser.append(f"ERROR: {e}")
 
-    def _deactivate_analysis_buttons(self):
-        self.plot_barcodes_button.setEnabled(False)
-        self.run_stats_button.setEnabled(False)
-        self.save_button.setEnabled(False)
-        self.selct_scanline_combo.setEnabled(False)
-        self.min_distance_spin.setEnabled(False)
-        self.max_distance_spin.setEnabled(False)
-        self.show_labels_checkbox.setEnabled(False)
-
-    def _get_or_create_output_group(self):
-        """Finds or creates a static group for output layers."""
-        group_name = "FracLine Results"
-        root = QgsProject.instance().layerTreeRoot()
-        output_group = root.findGroup(group_name)
-        if not output_group:
-            output_group = root.addGroup(group_name)
-            self.log_browser.append(f"Created output layer group: '{group_name}'")
-        else:
-            self.log_browser.append(
-                f"Using existing output layer group: '{group_name}'"
-            )
-        return output_group
-
     def _check_and_remove_existing_temp_layer(self, layer_name):
         """Checks for and offers to remove an existing temporary layer."""
         existing_layer = QgsProject.instance().mapLayersByName(layer_name)
@@ -628,7 +650,28 @@ class FracLineDockWidget(QgsDockWidget):
                     self.log_browser.append(f"Existing '{layer_name}' layer removed.")
         return True
 
-    def _apply_layer_style(self, target_layer, source_layer, is_point_layer=False):
+    def _get_or_create_output_group(self):
+        """Finds or creates a static group for output layers."""
+        group_name = "FracLine Results"
+        root = QgsProject.instance().layerTreeRoot()
+        output_group = root.findGroup(group_name)
+        if not output_group:
+            output_group = root.addGroup(group_name)
+            self.log_browser.append(f"Created output layer group: '{group_name}'")
+        else:
+            self.log_browser.append(
+                f"Using existing output layer group: '{group_name}'"
+            )
+        return output_group
+
+    def _apply_layer_style(
+        self,
+        target_layer,
+        source_layer,
+        is_point_layer=False,
+        thickness_factor=2,
+        opacity=1.0,
+    ):
         """
         Applies a consistent style to a target layer based on the source layer's renderer.
         If is_point_layer is True, it creates a point symbol based on the source line style.
@@ -674,11 +717,12 @@ class FracLineDockWidget(QgsDockWidget):
             )
         else:  # Line layer
             new_symbol = symbol.clone()
-            new_symbol.setWidth(symbol.width() * 2)  # Doubled thickness for emphasis
+            new_symbol.setWidth(symbol.width() * thickness_factor)
+            new_symbol.setOpacity(opacity)
             new_renderer = QgsSingleSymbolRenderer(new_symbol)
             target_layer.setRenderer(new_renderer)
             self.log_browser.append(
-                f"Style applied to '{target_layer.name()}' (line layer) with doubled thickness."
+                f"Style applied to '{target_layer.name()}' (line layer) with {thickness_factor}x thickness and {opacity*100}% opacity."
             )
 
         target_layer.triggerRepaint()
@@ -1031,9 +1075,9 @@ class FracLineDockWidget(QgsDockWidget):
 
         return self.scanlines_clip_split
 
-    def run_analysis(self):
+    def run_measuring(self):
         self.log_browser.append("==================================================")
-        self.log_browser.append("Running analysis...")
+        self.log_browser.append("Getting intersections and calculating distances...")
 
         try:
             project_crs = QgsProject.instance().crs()
@@ -1132,6 +1176,9 @@ class FracLineDockWidget(QgsDockWidget):
             self.log_browser.append(f"ERROR during analysis: {e}")
 
     def plot_barcodes(self):
+        """
+        Plot barcode representations of scanlines.
+        """
         if not self.plot_widget:
             self.plot_widget = FracLinePlotWidget(self.iface)
             self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
@@ -1254,13 +1301,17 @@ class FracLineDockWidget(QgsDockWidget):
         self.log_browser.append("Scanline analysis plot generated.")
 
     def run_stats_for_scanline(self):
+        """
+        Run statistical analysis for selected scanline self.this_scanline_id
+        within distance range self.min_distance - self.max_distance.
+        """
         if not self.plot_widget:
             self.plot_widget = FracLinePlotWidget(self.iface)
             self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
         self.plot_widget.show()
         self.plot_widget.tab_widget.setCurrentIndex(1)
 
-        # set scanline id and filter
+        # Set scanline id and filter
         self.this_scanline_id = self.selct_scanline_combo.currentText()
         if not self.this_scanline_id:
             self.log_browser.append("ERROR: Scanline ID must be selected.")
@@ -1286,9 +1337,11 @@ class FracLineDockWidget(QgsDockWidget):
         # Filter for distance range
         self.min_distance = self.min_distance_spin.value()
         self.max_distance = self.max_distance_spin.value()
-        
+
         # Apply filtering and write arrays
-        filtered_indices = (data[:, 1] >= self.min_distance) & (data[:, 1] <= self.max_distance)
+        filtered_indices = (data[:, 1] >= self.min_distance) & (
+            data[:, 1] <= self.max_distance
+        )
         data_filtered = data[filtered_indices]
         distances_order, distances, spacings_order, spacings = (
             data_filtered[:, 0],
@@ -1339,7 +1392,9 @@ class FracLineDockWidget(QgsDockWidget):
         intersection_distances = np.sort(np.array(temp_list))
 
         # Apply filtering and write arrays
-        filtered_indices = (intersection_distances >= self.min_distance) & (intersection_distances <= self.max_distance)
+        filtered_indices = (intersection_distances >= self.min_distance) & (
+            intersection_distances <= self.max_distance
+        )
         intersection_distances = intersection_distances[filtered_indices]
 
         # CSF - Cumulative Spacing Function
@@ -1391,8 +1446,8 @@ class FracLineDockWidget(QgsDockWidget):
             color="blue",
         )
         ax21.grid(True)
-        ax21.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        ax21.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax21.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax21.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax21.set_xlabel("Distance [order]")
         ax21.set_ylabel("Spacing [order]")
         if self.show_labels_checkbox.isChecked():
@@ -1432,8 +1487,8 @@ class FracLineDockWidget(QgsDockWidget):
             color="blue",
         )
         ax22.grid(True)
-        ax21.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-        ax21.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax21.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax21.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax22.set_xlabel("Spacing @ i [order]")
         ax22.set_ylabel("Spacing @ i+1 [order]")
         if self.show_labels_checkbox.isChecked():
@@ -1513,11 +1568,18 @@ class FracLineDockWidget(QgsDockWidget):
         self.save_button.setEnabled(True)
 
     def save_analysis(self):
+        """
+        Save selected scanline analysis to a temporary layer.
+        """
         if not hasattr(self, "this_scanline_id"):
-            self.log_browser.append("ERROR: No analysis to save. Run stats for a scanline first.")
+            self.log_browser.append(
+                "ERROR: No analysis to save. Run stats for a scanline first."
+            )
             return
 
-        layer_name = f"scanline_{self.this_scanline_id}_{self.min_distance}_{self.max_distance}"
+        layer_name = (
+            f"scanline_{self.this_scanline_id}_{self.min_distance}_{self.max_distance}"
+        )
         if not self._check_and_remove_existing_temp_layer(layer_name):
             return
 
@@ -1552,43 +1614,47 @@ class FracLineDockWidget(QgsDockWidget):
         request = QgsFeatureRequest().setFilterExpression(
             f"\"scanline_id\" = '{self.this_scanline_id}'"
         )
-        
+
         combined_geom = QgsGeometry()
         if self.scanlines_clip:
             for feature in self.scanlines_clip.getFeatures(request):
                 geom = feature.geometry()
                 d_start = feature["start"]
                 d_end = feature["end"]
-                
+
                 # Check for overlap between [min(d_start, d_end), max(d_start, d_end)]
                 # and [self.min_distance, self.max_distance]
                 p_min = min(d_start, d_end)
                 p_max = max(d_start, d_end)
-                
+
                 overlap_min = max(p_min, self.min_distance)
                 overlap_max = min(p_max, self.max_distance)
-                
+
                 if overlap_min < overlap_max:
                     # There is an overlap, find fractional positions
                     # f1 corresponds to overlap_min, f2 to overlap_max
                     f_min = (overlap_min - d_start) / (d_end - d_start)
                     f_max = (overlap_max - d_start) / (d_end - d_start)
-                    
+
                     length = geom.length()
-                    
+
                     # Workaround for QgsGeometry missing curveSubstring/lineSubstring in some QGIS versions
                     # We use the underlying QgsCurve if available
                     curve = geom.constGet()
-                    if hasattr(curve, 'curveSubstring'):
-                        sub_curve = curve.curveSubstring(min(f_min, f_max) * length, max(f_min, f_max) * length)
+                    if hasattr(curve, "curveSubstring"):
+                        sub_curve = curve.curveSubstring(
+                            min(f_min, f_max) * length, max(f_min, f_max) * length
+                        )
                         sub_geom = QgsGeometry(sub_curve)
                     else:
                         # Fallback to a simpler approach if curveSubstring is not available on the curve either
                         # Since we can't easily implement a robust substring, we'll try to use the geometry directly if it's very close
                         # but this is a last resort. Usually, curveSubstring should be on the curve.
                         # For now, let's try to cast it to a linestring if it's not.
-                        sub_geom = geom.curveSubstring(min(f_min, f_max) * length, max(f_min, f_max) * length)
-                    
+                        sub_geom = geom.curveSubstring(
+                            min(f_min, f_max) * length, max(f_min, f_max) * length
+                        )
+
                     if combined_geom.isNull():
                         combined_geom = sub_geom
                     else:
@@ -1622,8 +1688,18 @@ class FracLineDockWidget(QgsDockWidget):
         provider.addFeatures([new_feature])
         temp_layer.updateExtents()
 
+        self._apply_layer_style(
+            temp_layer,
+            self.scanlines_clip,
+            is_point_layer=False,
+            thickness_factor=4,
+            opacity=0.5,
+        )
+
         output_group = self._get_or_create_output_group()
         QgsProject.instance().addMapLayer(temp_layer, False)
         output_group.addLayer(temp_layer)
 
-        self.log_browser.append(f"Temporary layer '{layer_name}' created and added to canvas.")
+        self.log_browser.append(
+            f"Temporary layer '{layer_name}' created and added to canvas."
+        )
