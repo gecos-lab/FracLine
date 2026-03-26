@@ -32,6 +32,7 @@ from qgis.PyQt.QtWidgets import (
     QSpinBox,
     QComboBox,
     QCheckBox,
+    QDoubleSpinBox,
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
@@ -308,6 +309,18 @@ class FracLineDockWidget(QgsDockWidget):
         self.selct_scanline_combo.addItems(self.scanline_ids)
         self.selct_scanline_combo.setEnabled(False)
 
+        self.min_distance_spin = QDoubleSpinBox()
+        self.min_distance_spin.setRange(0, 100)
+        self.min_distance_spin.setSingleStep(0.1)
+        self.min_distance_spin.setValue(0)
+        self.min_distance_spin.setEnabled(False)
+
+        self.max_distance_spin = QDoubleSpinBox()
+        self.max_distance_spin.setRange(0, 100)
+        self.max_distance_spin.setSingleStep(0.1)
+        self.max_distance_spin.setValue(0)
+        self.max_distance_spin.setEnabled(False)
+
         self.show_labels_checkbox = QCheckBox("Show labels")
         self.show_labels_checkbox.setEnabled(False)
 
@@ -355,6 +368,10 @@ class FracLineDockWidget(QgsDockWidget):
         select_scan_layout = QHBoxLayout()
         select_scan_layout.addWidget(QLabel("Selected scanline:"))
         select_scan_layout.addWidget(self.selct_scanline_combo)
+        select_scan_layout.addStretch()
+        select_scan_layout.addWidget(QLabel("Min/max distance range:"))
+        select_scan_layout.addWidget(self.min_distance_spin)
+        select_scan_layout.addWidget(self.max_distance_spin)
         select_scan_layout.addStretch()
         select_scan_layout.addWidget(self.show_labels_checkbox)
         layout.addLayout(select_scan_layout)
@@ -1046,6 +1063,8 @@ class FracLineDockWidget(QgsDockWidget):
                     self.selct_scanline_combo.addItems(self.scanline_ids)
                     self.run_stats_button.setEnabled(True)
                     self.show_labels_checkbox.setEnabled(True)
+                    self.min_distance_spin.setEnabled(True)
+                    self.max_distance_spin.setEnabled(True)
             else:
                 self.log_browser.append(
                     "No fractures layer selected. Skipping intersection and splitting."
