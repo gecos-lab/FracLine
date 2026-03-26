@@ -1260,11 +1260,19 @@ class FracLineDockWidget(QgsDockWidget):
                 spacings_order.append(feature["spacing_order"])
         data = np.column_stack([distances_order, distances, spacings_order, spacings])
         data = data[data[:, 0].argsort()]
+
+        # Filter for distance range
+        min_distance = self.min_distance_spin.value()
+        max_distance = self.max_distance_spin.value()
+        
+        # Apply filtering and write arrays
+        filtered_indices = (data[:, 1] >= min_distance) & (data[:, 1] <= max_distance)
+        data_filtered = data[filtered_indices]
         distances_order, distances, spacings_order, spacings = (
-            data[:, 0],
-            data[:, 1],
-            data[:, 2],
-            data[:, 3],
+            data_filtered[:, 0],
+            data_filtered[:, 1],
+            data_filtered[:, 2],
+            data_filtered[:, 3],
         )
 
         # Calculate descriptive stats
@@ -1307,6 +1315,10 @@ class FracLineDockWidget(QgsDockWidget):
             for feature in self.intersections_layer.getFeatures(request):
                 temp_list.append(feature["distance"])
         intersection_distances = np.sort(np.array(temp_list))
+
+        # Apply filtering and write arrays
+        filtered_indices = (intersection_distances >= min_distance) & (intersection_distances <= max_distance)
+        intersection_distances = intersection_distances[filtered_indices]
 
         # CSF - Cumulative Spacing Function
         data_cumulative_probability, sorted_data = empirical_cdf(intersection_distances)
