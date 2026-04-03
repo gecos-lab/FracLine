@@ -1,3 +1,4 @@
+from .qt_compat import DOCKAREA_BOTTOM, DOCKAREA_LEFT, DOCKAREA_RIGHT, MSGBOX_NO, MSGBOX_YES
 # Copyright (C) 2026 Andrea Bistacchi
 #
 # This program is free software: you can redistribute it and/or modify
@@ -185,7 +186,7 @@ class FracLinePlugin:
     def run(self):
         if not self.dockwidget:
             self.dockwidget = FracLineDockWidget(self.iface)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dockwidget)
+            self.iface.addDockWidget(DOCKAREA_RIGHT, self.dockwidget)
         self.dockwidget.show()
 
 
@@ -197,7 +198,7 @@ class FracLinePlotWidget(QgsDockWidget):
     def __init__(self, iface):
         super().__init__("FracLine Plots")
         self.iface = iface
-        self.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self.setAllowedAreas(DOCKAREA_BOTTOM)
 
         # Main widget and layout
         main_widget = QWidget()
@@ -230,7 +231,7 @@ class FracLineDockWidget(QgsDockWidget):
     def __init__(self, iface):
         super().__init__("FracLine")
         self.iface = iface
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(DOCKAREA_LEFT | DOCKAREA_RIGHT)
 
         # Initialize layer variables
         self.scanlines_clip = None
@@ -637,10 +638,10 @@ class FracLineDockWidget(QgsDockWidget):
                     self,
                     "Overwrite Layer?",
                     f"A temporary layer named '{layer_name}' already exists. Do you want to overwrite it?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
+                    MSGBOX_YES | MSGBOX_NO,
+                    MSGBOX_NO,
                 )
-                if reply == QMessageBox.No:
+                if reply == MSGBOX_NO:
                     self.log_browser.append(
                         f"Analysis aborted by user for layer '{layer_name}'."
                     )
@@ -1181,7 +1182,7 @@ class FracLineDockWidget(QgsDockWidget):
         """
         if not self.plot_widget:
             self.plot_widget = FracLinePlotWidget(self.iface)
-            self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
+            self.iface.addDockWidget(DOCKAREA_BOTTOM, self.plot_widget)
         self.plot_widget.show()
         self.plot_widget.tab_widget.setCurrentIndex(0)
 
@@ -1307,7 +1308,7 @@ class FracLineDockWidget(QgsDockWidget):
         """
         if not self.plot_widget:
             self.plot_widget = FracLinePlotWidget(self.iface)
-            self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.plot_widget)
+            self.iface.addDockWidget(DOCKAREA_BOTTOM, self.plot_widget)
         self.plot_widget.show()
         self.plot_widget.tab_widget.setCurrentIndex(1)
 
