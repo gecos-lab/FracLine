@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
 def classFactory(iface):
-    from .FracLine import FracLinePlugin
+    from .fracline_core import FracLinePlugin
     return FracLinePlugin(iface)
