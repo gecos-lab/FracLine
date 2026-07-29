@@ -32,6 +32,7 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import (
@@ -395,6 +396,11 @@ class FracLineDockWidget(QgsDockWidget):
 
         layout.addWidget(self.plot_barcodes_button)
 
+        # Button to export figure1 (SVG and PNG)
+        self.export_fig1_button = QPushButton("Export barcode plots...")
+        self.export_fig1_button.setEnabled(False)
+        layout.addWidget(self.export_fig1_button)
+
         select_scan_layout = QHBoxLayout()
         select_scan_layout.addWidget(QLabel("Selected scanline:"))
         select_scan_layout.addWidget(self.selct_scanline_combo)
@@ -408,6 +414,11 @@ class FracLineDockWidget(QgsDockWidget):
 
         layout.addWidget(self.run_stats_button)
         layout.addWidget(self.save_button)
+
+        # Button to export figure2 (SVG and PNG)
+        self.export_fig2_button = QPushButton("Export statistics plots...")
+        self.export_fig2_button.setEnabled(False)
+        layout.addWidget(self.export_fig2_button)
 
         layout.addWidget(self.log_browser)
 
@@ -423,6 +434,9 @@ class FracLineDockWidget(QgsDockWidget):
         self.interpretation_boundary_combo.layerChanged.connect(self.validate_layers)
         self.measure_button.clicked.connect(self.run_measuring)
         self.plot_barcodes_button.clicked.connect(self.plot_barcodes)
+        self.export_fig1_button.clicked.connect(self.export_figure1)
+        self.run_stats_button.clicked.connect(self.run_stats_for_scanline)
+        self.export_fig2_button.clicked.connect(self.export_figure2)
         self.scanline_id_field_combo.currentIndexChanged.connect(self.validate_layers)
         self.selct_scanline_combo.currentIndexChanged.connect(
             self.update_distance_spins
@@ -449,6 +463,8 @@ class FracLineDockWidget(QgsDockWidget):
         self.plot_barcodes_button.setEnabled(False)
         self.run_stats_button.setEnabled(False)
         self.save_button.setEnabled(False)
+        self.export_fig1_button.setEnabled(False)
+        self.export_fig2_button.setEnabled(False)
         self.selct_scanline_combo.setEnabled(False)
         self.min_distance_spin.setEnabled(False)
         self.max_distance_spin.setEnabled(False)
@@ -1299,6 +1315,12 @@ class FracLineDockWidget(QgsDockWidget):
         fig1.tight_layout()
         self.plot_widget.canvas1.draw()
 
+        # Enable export button now that figure1 has been generated
+        try:
+            self.export_fig1_button.setEnabled(True)
+        except Exception:
+            pass
+
         self.log_browser.append("Scanline analysis plot generated.")
 
     def run_stats_for_scanline(self):
@@ -1567,6 +1589,131 @@ class FracLineDockWidget(QgsDockWidget):
                 f"Result: Significant pattern detected (reject Ho)."
             )
         self.save_button.setEnabled(True)
+        # Enable export button now that figure2 has been produced
+        try:
+            self.export_fig2_button.setEnabled(True)
+        except Exception:
+            pass
+
+    def export_figure1(self):
+        """
+        Export self.plot_widget.figure1 to SVG and PNG files.
+        Opens a file dialog to choose filename and folder. Default filename is
+        <fractures_layer>_<scanline_name>_barcode and default folder is
+        the QGIS project root directory.
+        """
+        if not hasattr(self, "plot_widget") or self.plot_widget is None:
+            self.log_browser.append("ERROR: Plot widget not found. Generate plots first.")
+            return
+
+        fig = self.plot_widget.figure1
+
+        # Determine default folder: project file directory or current working dir
+        proj_file = QgsProject.instance().fileName()
+        if proj_file:
+            default_dir = os.path.dirname(proj_file)
+            if not default_dir:
+                default_dir = os.getcwd()
+        else:
+            default_dir = os.getcwd()
+
+        # Default filename: fractures layer name + scanline id + barcode
+        fractures_name = (
+            self.fractures_layer.name() if self.fractures_layer is not None else "fractures"
+        )
+        scanline_name = (
+            getattr(self, "this_scanline_id", None)
+            or self.selct_scanline_combo.currentText()
+            or "scanline"
+        )
+        default_name = f"{fractures_name}_{scanline_name}_barcode"
+        suggested_path = os.path.join(default_dir, default_name)
+
+        # Get filename from user (PNG format)
+        png_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export barcode plot as PNG",
+            suggested_path + ".png",
+            "PNG files (*.png);;All files (*.*)",
+        )
+        if not png_path:
+            return
+
+        # Save as PNG
+        try:
+            fig.savefig(png_path, bbox_inches="tight", dpi=150)
+            self.log_browser.append(f"Saved PNG: {png_path}")
+        except Exception as e:
+            self.log_browser.append(f"ERROR saving PNG: {e}")
+            return
+
+        # Save as SVG with same base name
+        svg_path = os.path.splitext(png_path)[0] + ".svg"
+        try:
+            fig.savefig(svg_path, bbox_inches="tight")
+            self.log_browser.append(f"Saved SVG: {svg_path}")
+        except Exception as e:
+            self.log_browser.append(f"ERROR saving SVG: {e}")
+
+    def export_figure2(self):
+        """
+        Export self.plot_widget.figure2 to SVG and PNG files.
+        Opens a file dialog to choose filename and folder. Default filename is
+        <fractures_layer>_<scanline_name>_stats and default folder is
+        the QGIS project root directory.
+        """
+        if not hasattr(self, "plot_widget") or self.plot_widget is None:
+            self.log_browser.append("ERROR: Plot widget not found. Generate plots first.")
+            return
+
+        fig = self.plot_widget.figure2
+
+        # Determine default folder: project file directory or current working dir
+        proj_file = QgsProject.instance().fileName()
+        if proj_file:
+            default_dir = os.path.dirname(proj_file)
+            if not default_dir:
+                default_dir = os.getcwd()
+        else:
+            default_dir = os.getcwd()
+
+        # Default filename: fractures layer name + scanline id + stats
+        fractures_name = (
+            self.fractures_layer.name() if self.fractures_layer is not None else "fractures"
+        )
+        scanline_name = (
+            getattr(self, "this_scanline_id", None)
+            or self.selct_scanline_combo.currentText()
+            or "scanline"
+        )
+        default_name = f"{fractures_name}_{scanline_name}_stats"
+        suggested_path = os.path.join(default_dir, default_name)
+
+        # Get filename from user (PNG format)
+        png_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export statistics plot as PNG",
+            suggested_path + ".png",
+            "PNG files (*.png);;All files (*.*)",
+        )
+        if not png_path:
+            return
+
+        # Save as PNG
+        try:
+            fig.savefig(png_path, bbox_inches="tight", dpi=150)
+            self.log_browser.append(f"Saved PNG: {png_path}")
+        except Exception as e:
+            self.log_browser.append(f"ERROR saving PNG: {e}")
+            return
+
+        # Save as SVG with same base name
+        svg_path = os.path.splitext(png_path)[0] + ".svg"
+        try:
+            fig.savefig(svg_path, bbox_inches="tight")
+            self.log_browser.append(f"Saved SVG: {svg_path}")
+        except Exception as e:
+            self.log_browser.append(f"ERROR saving SVG: {e}")
 
     def save_analysis(self):
         """
